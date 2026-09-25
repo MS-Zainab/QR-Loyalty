@@ -6,7 +6,40 @@ const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
 
-// Create a new vendor/tenant
+/**
+ * @swagger
+ * /api/tenants:
+ *   post:
+ *     summary: Create a new vendor
+ *     description: Creates a new vendor/tenant. Only platform administrators can perform this action.
+ *     tags:
+ *       - Tenants
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - business_name
+ *             properties:
+ *               business_name:
+ *                 type: string
+ *                 example: Loyalty Demo Cafe
+ *     responses:
+ *       201:
+ *         description: Vendor created successfully
+ *       400:
+ *         description: Business name is required
+ *       401:
+ *         description: Authentication required or token is invalid/expired
+ *       403:
+ *         description: Admin role required
+ *       500:
+ *         description: Server error while creating vendor
+ */
 router.post(
   '/',
   requireAuth,
@@ -56,7 +89,26 @@ router.post(
   }
 );
 
-// Get all vendors/tenants
+/**
+ * @swagger
+ * /api/tenants:
+ *   get:
+ *     summary: Get all vendors
+ *     description: Returns all vendors/tenants. Only platform administrators can access this endpoint.
+ *     tags:
+ *       - Tenants
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Vendors fetched successfully
+ *       401:
+ *         description: Authentication required or token is invalid/expired
+ *       403:
+ *         description: Admin role required
+ *       500:
+ *         description: Server error while fetching vendors
+ */
 router.get(
   '/',
   requireAuth,
@@ -92,7 +144,53 @@ router.get(
   }
 );
 
-// Update vendor status
+/**
+ * @swagger
+ * /api/tenants/{id}/status:
+ *   patch:
+ *     summary: Update vendor status
+ *     description: Changes a vendor status between active, hold, and removed. Only platform administrators can perform this action.
+ *     tags:
+ *       - Tenants
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: Vendor/tenant UUID
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *           example: 060992ac-2169-4a56-8feb-cb45040f6b24
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - status
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum:
+ *                   - active
+ *                   - hold
+ *                   - removed
+ *                 example: hold
+ *     responses:
+ *       200:
+ *         description: Vendor status updated successfully
+ *       400:
+ *         description: Invalid vendor status
+ *       401:
+ *         description: Authentication required or token is invalid/expired
+ *       403:
+ *         description: Admin role required
+ *       500:
+ *         description: Server error while updating vendor status
+ */
 router.patch(
   '/:id/status',
   requireAuth,
@@ -146,7 +244,61 @@ router.patch(
   }
 );
 
-// Create a vendor owner for a tenant
+/**
+ * @swagger
+ * /api/tenants/{id}/owner:
+ *   post:
+ *     summary: Create vendor owner
+ *     description: Creates a Supabase Auth account and application profile for a vendor owner. Only platform administrators can perform this action.
+ *     tags:
+ *       - Tenants
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: Vendor/tenant UUID
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *           example: 060992ac-2169-4a56-8feb-cb45040f6b24
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - password
+ *               - full_name
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 example: owner@example.com
+ *               password:
+ *                 type: string
+ *                 format: password
+ *                 example: SecurePassword123!
+ *               full_name:
+ *                 type: string
+ *                 example: Cafe Owner
+ *     responses:
+ *       201:
+ *         description: Vendor owner created successfully
+ *       400:
+ *         description: Invalid request, weak password, inactive vendor, or Auth creation error
+ *       401:
+ *         description: Authentication required or token is invalid/expired
+ *       403:
+ *         description: Admin role required
+ *       404:
+ *         description: Vendor not found
+ *       500:
+ *         description: Server error while creating vendor owner
+ */
 router.post(
   '/:id/owner',
   requireAuth,
@@ -254,7 +406,61 @@ router.post(
   }
 );
 
-// Create a vendor staff member for a tenant
+/**
+ * @swagger
+ * /api/tenants/{id}/staff:
+ *   post:
+ *     summary: Create vendor staff member
+ *     description: Creates a Supabase Auth account and application profile for vendor staff. Platform admins can create staff for any vendor, while vendor owners can create staff only for their own vendor.
+ *     tags:
+ *       - Tenants
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: Vendor/tenant UUID
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *           example: 060992ac-2169-4a56-8feb-cb45040f6b24
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - password
+ *               - full_name
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 example: staff@example.com
+ *               password:
+ *                 type: string
+ *                 format: password
+ *                 example: SecurePassword123!
+ *               full_name:
+ *                 type: string
+ *                 example: Counter Staff
+ *     responses:
+ *       201:
+ *         description: Vendor staff created successfully
+ *       400:
+ *         description: Invalid request, weak password, inactive vendor, or Auth creation error
+ *       401:
+ *         description: Authentication required or token is invalid/expired
+ *       403:
+ *         description: User is not authorized or vendor owner is managing another vendor
+ *       404:
+ *         description: Vendor not found
+ *       500:
+ *         description: Server error while creating vendor staff
+ */
 router.post(
   '/:id/staff',
   requireAuth,

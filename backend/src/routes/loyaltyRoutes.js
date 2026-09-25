@@ -6,7 +6,28 @@ const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
 
-// Get current vendor loyalty program
+/**
+ * @swagger
+ * /api/loyalty:
+ *   get:
+ *     summary: Get current vendor loyalty program
+ *     description: Returns the loyalty program belonging to the authenticated vendor. Vendor owners and staff can access this endpoint.
+ *     tags:
+ *       - Loyalty
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Loyalty program fetched successfully
+ *       400:
+ *         description: User is not linked to a vendor
+ *       401:
+ *         description: Authentication required or token is invalid/expired
+ *       403:
+ *         description: Vendor owner or vendor staff role required
+ *       500:
+ *         description: Server error while fetching loyalty program
+ */
 router.get(
   '/',
   requireAuth,
@@ -52,7 +73,47 @@ router.get(
   }
 );
 
-// Create or update vendor loyalty program
+/**
+ * @swagger
+ * /api/loyalty:
+ *   post:
+ *     summary: Create or update loyalty program
+ *     description: Creates a loyalty program for the authenticated vendor or updates the existing program. Only the vendor owner can perform this action.
+ *     tags:
+ *       - Loyalty
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - stamps_required
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 description: Name of the loyalty program
+ *                 example: Loyalty Demo Rewards
+ *               stamps_required:
+ *                 type: integer
+ *                 minimum: 1
+ *                 description: Number of stamps required to complete the loyalty program
+ *                 example: 10
+ *     responses:
+ *       200:
+ *         description: Loyalty program created or updated successfully
+ *       400:
+ *         description: Invalid loyalty program data or user is not linked to a vendor
+ *       401:
+ *         description: Authentication required or token is invalid/expired
+ *       403:
+ *         description: Vendor owner role required
+ *       500:
+ *         description: Server error while saving loyalty program
+ */
 router.post(
   '/',
   requireAuth,
