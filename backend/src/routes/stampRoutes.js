@@ -6,7 +6,52 @@ const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
 
-// Issue one loyalty stamp to a customer
+/**
+ * @swagger
+ * /api/stamps:
+ *   post:
+ *     summary: Issue a loyalty stamp
+ *     description: Issues one loyalty stamp to a customer for a verified visit. Only active vendor staff can perform this operation.
+ *     tags:
+ *       - Stamps
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - customer_id
+ *               - visit_id
+ *             properties:
+ *               customer_id:
+ *                 type: string
+ *                 format: uuid
+ *                 description: Customer receiving the loyalty stamp
+ *                 example: 4e9a1fc6-0b67-40eb-8eac-b57c013e3c5d
+ *               visit_id:
+ *                 type: string
+ *                 format: uuid
+ *                 description: Verified customer visit associated with the stamp
+ *                 example: ad49cb6e-79b2-400f-9d75-c5ffd246e412
+ *     responses:
+ *       201:
+ *         description: Loyalty stamp issued successfully
+ *       400:
+ *         description: Missing IDs, staff is not linked to a vendor, or active staff record was not found
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Only vendor staff can issue loyalty stamps
+ *       404:
+ *         description: Customer or visit not found for this vendor
+ *       409:
+ *         description: A stamp has already been issued for this visit
+ *       500:
+ *         description: Failed to issue loyalty stamp
+ */
 router.post(
   '/',
   requireAuth,

@@ -7,7 +7,28 @@ const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
 
-// Get current vendor QR
+/**
+ * @swagger
+ * /api/qr:
+ *   get:
+ *     summary: Get current vendor QR code
+ *     description: Returns the active QR code for the authenticated vendor.
+ *     tags:
+ *       - QR Codes
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: QR code fetched successfully
+ *       400:
+ *         description: User is not linked to a vendor
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: User does not have permission
+ *       500:
+ *         description: Failed to fetch QR code
+ */
 router.get(
   '/',
   requireAuth,
@@ -54,7 +75,30 @@ router.get(
   }
 );
 
-// Create QR for current vendor
+/**
+ * @swagger
+ * /api/qr:
+ *   post:
+ *     summary: Create vendor QR code
+ *     description: Creates a permanent active QR code for the authenticated vendor. If an active QR already exists, the existing QR is returned.
+ *     tags:
+ *       - QR Codes
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       201:
+ *         description: QR code created successfully
+ *       200:
+ *         description: Active QR code already exists
+ *       400:
+ *         description: User is not linked to a vendor
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Only vendor owners can create QR codes
+ *       500:
+ *         description: Failed to create QR code
+ */
 router.post(
   '/',
   requireAuth,

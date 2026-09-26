@@ -12,6 +12,9 @@ const qrRoutes = require('./routes/qrRoutes');
 const verificationRoutes = require('./routes/verificationRoutes');
 const customerRoutes = require('./routes/customerRoutes');
 const stampRoutes = require('./routes/stampRoutes');
+const ownerRoutes = require('./routes/ownerRoutes');
+const staffRoutes = require('./routes/staffRoutes');
+const adminRoutes = require('./routes/adminRoutes');
 
 
 const express = require('express');
@@ -33,7 +36,9 @@ app.use('/api/qr', qrRoutes);
 app.use('/api/verification', verificationRoutes);
 app.use('/api/customers', customerRoutes);
 app.use('/api/stamps', stampRoutes);
-
+app.use('/api/owner', ownerRoutes);
+app.use('/api/staff', staffRoutes);
+app.use('/api/admin', adminRoutes);
 
 
 app.get('/api/health', (req, res) => {

@@ -7,9 +7,28 @@ const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
 
-// =====================================================
-// Generate a 60-second verification PIN for staff
-// =====================================================
+/**
+ * @swagger
+ * /api/verification/generate:
+ *   post:
+ *     summary: Generate staff verification PIN
+ *     description: Generates a random 6-digit verification PIN for the authenticated vendor staff member. The PIN remains valid for 60 seconds.
+ *     tags:
+ *       - Verification
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       201:
+ *         description: Verification PIN generated successfully
+ *       400:
+ *         description: Staff member is not linked to a vendor or active staff record was not found
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Only vendor staff can generate verification PINs
+ *       500:
+ *         description: Failed to generate verification PIN
+ */
 router.post(
   '/generate',
   requireAuth,
@@ -132,9 +151,46 @@ router.post(
   }
 );
 
-// =====================================================
-// Verify customer using shop QR + staff PIN
-// =====================================================
+/**
+ * @swagger
+ * /api/verification/verify:
+ *   post:
+ *     summary: Verify customer using QR code and staff PIN
+ *     description: Verifies a customer by matching the vendor's active QR code with a valid 60-second staff verification PIN and records the customer visit.
+ *     tags:
+ *       - Verification
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - qr_code
+ *               - pin
+ *             properties:
+ *               qr_code:
+ *                 type: string
+ *                 example: 4d70ca1b3a60e45cd1f5d09c5e0c34d6
+ *               pin:
+ *                 type: string
+ *                 example: 123456
+ *     responses:
+ *       200:
+ *         description: Customer verified successfully and visit recorded
+ *       400:
+ *         description: Invalid QR code, invalid PIN, expired PIN, or missing required fields
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Only customers can use customer verification
+ *       404:
+ *         description: Customer is not registered with this vendor
+ *       500:
+ *         description: Customer verification failed
+ */
 router.post(
   '/verify',
   requireAuth,
