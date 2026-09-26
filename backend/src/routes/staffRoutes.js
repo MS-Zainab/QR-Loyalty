@@ -180,4 +180,220 @@ router.get(
   }
 );
 
+
+/**
+ * @swagger
+ * /api/staff/verified-visits:
+ *   get:
+ *     summary: Get recent verified customer visits
+ *     description: Returns recent customer visits verified by the authenticated staff member that have not yet received a stamp.
+ *     tags:
+ *       - Staff
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Verified visits retrieved successfully
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Only active vendor staff can access this resource
+ *       404:
+ *         description: Staff record not found
+ *       500:
+ *         description: Failed to retrieve verified visits
+ */
+router.get(
+  '/verified-visits',
+  requireAuth,
+  requireRole('vendor_staff'),
+  async (req, res) => {
+    try {
+      const tenantId = req.profile.tenant_id;
+      const profileId = req.profile.id;
+
+      if (!tenantId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Staff member is not associated with a tenant'
+        });
+      }
+
+      // Find the operational staff record
+      const { data: staff, error: staffError } =
+        await supabaseAdmin
+          .from('staff')
+          .select(
+            'id, tenant_id, profile_id, is_active'
+          )
+          .eq('tenant_id', tenantId)
+          .eq('profile_id', profileId)
+          .single();
+
+      if (staffError || !staff) {
+        return res.status(404).json({
+          success: false,
+          message: 'Staff record not found'
+        });
+      }
+
+      if (!staff.is_active) {
+        return res.status(403).json({
+          success: false,
+          message: 'Staff account is inactive'
+        });
+      }
+
+      // Get recent visits verified by this staff member
+      const { data: visits, error: visitsError } =
+        await supabaseAdmin
+          .from('visits')
+          .select(
+            'id, tenant_id, customer_id, staff_id, visited_at'
+          )
+          .eq('tenant_id', tenantId)
+          .eq('staff_id', staff.id)
+          .order('visited_at', {
+            ascending: false
+          })
+          .limit(20);
+
+      if (visitsError) {
+        console.error(
+          'Staff verified visits error:',
+          visitsError
+        );
+
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to retrieve verified visits'
+        });
+      }
+
+      if (!visits || visits.length === 0) {
+        return res.status(200).json({
+          success: true,
+          message: 'No verified visits found',
+          visits: []
+        });
+      }
+
+      // Get stamps already issued for these visits
+      const visitIds = visits.map(
+        (visit) => visit.id
+      );
+
+      const { data: stamps, error: stampsError } =
+        await supabaseAdmin
+          .from('stamps')
+          .select(
+            'id, visit_id, customer_id, created_at'
+          )
+          .eq('tenant_id', tenantId)
+          .in('visit_id', visitIds);
+
+      if (stampsError) {
+        console.error(
+          'Verified visit stamp lookup error:',
+          stampsError
+        );
+
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to check visit stamp status'
+        });
+      }
+
+      // Only keep visits that have not received a stamp yet
+      const stampedVisitIds = new Set(
+        (stamps || []).map(
+          (stamp) => stamp.visit_id
+        )
+      );
+
+      const pendingVisits = visits.filter(
+        (visit) =>
+          !stampedVisitIds.has(visit.id)
+      );
+
+      // Get customer information
+      const customerIds = [
+        ...new Set(
+          pendingVisits.map(
+            (visit) => visit.customer_id
+          )
+        )
+      ];
+
+      let customers = [];
+
+      if (customerIds.length > 0) {
+        const {
+          data: customerData,
+          error: customersError
+        } = await supabaseAdmin
+          .from('customers')
+          .select(
+            'id, name, phone, email, status'
+          )
+          .eq('tenant_id', tenantId)
+          .in('id', customerIds);
+
+        if (customersError) {
+          console.error(
+            'Staff customer lookup error:',
+            customersError
+          );
+
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve customer information'
+          });
+        }
+
+        customers = customerData || [];
+      }
+
+      const customerMap = new Map(
+        customers.map(
+          (customer) => [
+            customer.id,
+            customer
+          ]
+        )
+      );
+
+      const result = pendingVisits.map(
+        (visit) => ({
+          id: visit.id,
+          tenant_id: visit.tenant_id,
+          customer_id: visit.customer_id,
+          staff_id: visit.staff_id,
+          visited_at: visit.visited_at,
+          customer:
+            customerMap.get(
+              visit.customer_id
+            ) || null
+        })
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: 'Verified visits retrieved successfully',
+        visits: result
+      });
+    } catch (error) {
+      console.error(
+        'Verified visits error:',
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to retrieve verified visits'
+      });
+    }
+  }
+);
+
 module.exports = router;

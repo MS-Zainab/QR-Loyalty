@@ -16,36 +16,6 @@ const router = express.Router();
  *       - Customers
  *     security:
  *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - qr_code
- *             properties:
- *               qr_code:
- *                 type: string
- *                 description: Active vendor QR code
- *                 example: 4d70ca1b3a60e45cd1f5d09c5e0c34d6
- *               phone:
- *                 type: string
- *                 description: Optional customer phone number
- *                 example: "03001234567"
- *     responses:
- *       201:
- *         description: Customer registered with vendor successfully
- *       200:
- *         description: Customer is already registered with this vendor
- *       400:
- *         description: QR code is missing or invalid/inactive
- *       401:
- *         description: Authentication required
- *       403:
- *         description: Only customers can register with a vendor
- *       500:
- *         description: Customer registration failed
  */
 router.post(
   '/register',
@@ -62,7 +32,6 @@ router.post(
         });
       }
 
-      // Find active vendor QR
       const { data: qrRecord, error: qrError } =
         await supabaseAdmin
           .from('qr_codes')
@@ -90,7 +59,6 @@ router.post(
       const tenantId = qrRecord.tenant_id;
       const profileId = req.profile.id;
 
-      // Check if customer is already registered with this vendor
       const { data: existingCustomer, error: existingError } =
         await supabaseAdmin
           .from('customers')
@@ -121,7 +89,6 @@ router.post(
         });
       }
 
-      // Create customer record
       const { data: customer, error: customerError } =
         await supabaseAdmin
           .from('customers')
@@ -169,25 +136,142 @@ router.post(
   }
 );
 
+
+/**
+ * Calculate current loyalty progress.
+ *
+ * Historical stamps are never deleted.
+ *
+ * Current progress =
+ * total historical stamps - stamps consumed by successful redemptions.
+ *
+ * Each redemption consumes the stamps_required value of its reward.
+ */
+async function calculateCustomerProgress(
+  tenantId,
+  customerId,
+  loyaltyProgram
+) {
+  const { count: totalStampCount, error: stampError } =
+    await supabaseAdmin
+      .from('stamps')
+      .select('id', {
+        count: 'exact',
+        head: true
+      })
+      .eq('tenant_id', tenantId)
+      .eq('customer_id', customerId);
+
+  if (stampError) {
+    throw stampError;
+  }
+
+  const totalStamps = totalStampCount || 0;
+
+  const { data: redemptionRows, error: redemptionError } =
+    await supabaseAdmin
+      .from('redemptions')
+      .select('id, reward_id')
+      .eq('tenant_id', tenantId)
+      .eq('customer_id', customerId);
+
+  if (redemptionError) {
+    throw redemptionError;
+  }
+
+  let consumedStamps = 0;
+
+  if (redemptionRows && redemptionRows.length > 0) {
+    const rewardIds = [
+      ...new Set(
+        redemptionRows
+          .map((redemption) => redemption.reward_id)
+          .filter(Boolean)
+      )
+    ];
+
+    if (rewardIds.length > 0) {
+      const { data: redeemedRewards, error: rewardError } =
+        await supabaseAdmin
+          .from('rewards')
+          .select('id, stamps_required')
+          .eq('tenant_id', tenantId)
+          .in('id', rewardIds);
+
+      if (rewardError) {
+        throw rewardError;
+      }
+
+      const rewardStampMap = new Map(
+        (redeemedRewards || []).map((reward) => [
+          reward.id,
+          Number(reward.stamps_required) || 0
+        ])
+      );
+
+      consumedStamps = redemptionRows.reduce(
+        (total, redemption) => {
+          return (
+            total +
+            (rewardStampMap.get(redemption.reward_id) || 0)
+          );
+        },
+        0
+      );
+    }
+  }
+
+  let stampsRequired = loyaltyProgram
+    ? Number(loyaltyProgram.stamps_required)
+    : 0;
+
+  if (!Number.isInteger(stampsRequired) || stampsRequired <= 0) {
+    stampsRequired = 0;
+  }
+
+  const currentProgress = Math.max(
+    totalStamps - consumedStamps,
+    0
+  );
+
+  const completedCycles =
+    stampsRequired > 0
+      ? Math.floor(currentProgress / stampsRequired)
+      : 0;
+
+  const currentCycleProgress =
+    stampsRequired > 0
+      ? currentProgress % stampsRequired
+      : currentProgress;
+
+  const remainingStamps =
+    stampsRequired > 0
+      ? Math.max(
+          stampsRequired - currentCycleProgress,
+          0
+        )
+      : 0;
+
+  return {
+    total_stamps: totalStamps,
+    consumed_stamps: consumedStamps,
+    current_progress: currentCycleProgress,
+    stamps_required: stampsRequired,
+    remaining_stamps: remainingStamps,
+    completed_cycles: completedCycles
+  };
+}
+
+
 /**
  * @swagger
  * /api/customers/me:
  *   get:
  *     summary: Get current customer loyalty progress
- *     description: Returns the authenticated customer's profile, vendor memberships, current stamp progress, available rewards, and redemption progress.
  *     tags:
  *       - Customers
  *     security:
  *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Customer loyalty progress retrieved successfully
- *       401:
- *         description: Authentication required
- *       403:
- *         description: Only customers can access this resource
- *       500:
- *         description: Failed to retrieve customer loyalty progress
  */
 router.get(
   '/me',
@@ -197,7 +281,6 @@ router.get(
     try {
       const profileId = req.profile.id;
 
-      // Find all active vendor memberships for this customer
       const { data: customers, error: customerError } =
         await supabaseAdmin
           .from('customers')
@@ -235,13 +318,12 @@ router.get(
       const memberships = [];
 
       for (const customer of customers) {
-        // Get active loyalty program for this vendor
         const { data: loyaltyProgram, error: loyaltyError } =
           await supabaseAdmin
             .from('loyalty_programs')
             .select(
-  'id, tenant_id, name, reward_description, stamps_required, is_active'
-)
+              'id, tenant_id, name, reward_description, stamps_required, is_active'
+            )
             .eq('tenant_id', customer.tenant_id)
             .eq('is_active', true)
             .maybeSingle();
@@ -258,30 +340,12 @@ router.get(
           });
         }
 
-        // Count customer's total stamps for this vendor
-        const { count: totalStamps, error: stampError } =
-          await supabaseAdmin
-            .from('stamps')
-            .select('id', {
-              count: 'exact',
-              head: true
-            })
-            .eq('tenant_id', customer.tenant_id)
-            .eq('customer_id', customer.id);
+        const progress = await calculateCustomerProgress(
+          customer.tenant_id,
+          customer.id,
+          loyaltyProgram
+        );
 
-        if (stampError) {
-          console.error(
-            'Customer stamp count error:',
-            stampError
-          );
-
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve stamp progress'
-          });
-        }
-
-        // Get active rewards for this vendor
         const { data: rewards, error: rewardError } =
           await supabaseAdmin
             .from('rewards')
@@ -303,7 +367,6 @@ router.get(
           });
         }
 
-        // Get customer's redemption history for this vendor
         const { data: redemptions, error: redemptionError } =
           await supabaseAdmin
             .from('redemptions')
@@ -328,44 +391,10 @@ router.get(
           });
         }
 
-        const stampCount = totalStamps || 0;
-
-        let stampsRequired = loyaltyProgram
-          ? loyaltyProgram.stamps_required
-          : 0;
-
-        if (!Number.isInteger(stampsRequired) || stampsRequired <= 0) {
-          stampsRequired = 0;
-        }
-
-        const completedCycles =
-          stampsRequired > 0
-            ? Math.floor(stampCount / stampsRequired)
-            : 0;
-
-        const currentProgress =
-          stampsRequired > 0
-            ? stampCount % stampsRequired
-            : stampCount;
-
-        const remainingStamps =
-          stampsRequired > 0
-            ? stampsRequired - currentProgress
-            : 0;
-
         memberships.push({
           customer,
           loyalty_program: loyaltyProgram,
-          progress: {
-            total_stamps: stampCount,
-            stamps_required: stampsRequired,
-            current_progress: currentProgress,
-            remaining_stamps:
-              currentProgress === 0 && completedCycles > 0
-                ? 0
-                : remainingStamps,
-            completed_cycles: completedCycles
-          },
+          progress,
           rewards: rewards || [],
           redemptions: redemptions || []
         });
@@ -401,20 +430,10 @@ router.get(
  * /api/customers/me/stamps:
  *   get:
  *     summary: Get current customer's stamp history
- *     description: Returns the authenticated customer's loyalty stamp history across their active vendor memberships.
  *     tags:
  *       - Customers
  *     security:
  *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Customer stamp history retrieved successfully
- *       401:
- *         description: Authentication required
- *       403:
- *         description: Only customers can access this resource
- *       500:
- *         description: Failed to retrieve customer stamp history
  */
 router.get(
   '/me/stamps',
@@ -424,7 +443,6 @@ router.get(
     try {
       const profileId = req.profile.id;
 
-      // Find all active vendor memberships for this customer
       const { data: customers, error: customerError } =
         await supabaseAdmin
           .from('customers')
@@ -455,7 +473,6 @@ router.get(
       const stampHistory = [];
 
       for (const customer of customers) {
-        // Get all stamps belonging to this customer and vendor
         const { data: stamps, error: stampError } =
           await supabaseAdmin
             .from('stamps')
@@ -480,11 +497,49 @@ router.get(
           });
         }
 
+        const { data: loyaltyProgram, error: loyaltyError } =
+          await supabaseAdmin
+            .from('loyalty_programs')
+            .select(
+              'id, stamps_required, is_active'
+            )
+            .eq('tenant_id', customer.tenant_id)
+            .eq('is_active', true)
+            .maybeSingle();
+
+        if (loyaltyError) {
+          console.error(
+            'Customer stamp history loyalty lookup error:',
+            loyaltyError
+          );
+
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve loyalty program'
+          });
+        }
+
+        const progress = await calculateCustomerProgress(
+          customer.tenant_id,
+          customer.id,
+          loyaltyProgram
+        );
+
         stampHistory.push({
           customer_id: customer.id,
           tenant_id: customer.tenant_id,
           customer_name: customer.name,
+
+          // Historical stamp count.
           total_stamps: stamps ? stamps.length : 0,
+
+          // Current loyalty progress after redemptions.
+          current_progress: progress.current_progress,
+          consumed_stamps: progress.consumed_stamps,
+          stamps_required: progress.stamps_required,
+          stamps_remaining: progress.remaining_stamps,
+
+          // Full historical stamp records are preserved.
           stamps: stamps || []
         });
       }
@@ -502,7 +557,7 @@ router.get(
 
       return res.status(500).json({
         success: false,
-        message: 'Failed to retrieve customer stamp history'
+        message: 'Failed to retrieve stamp history'
       });
     }
   }
@@ -514,20 +569,10 @@ router.get(
  * /api/customers/me/redemptions:
  *   get:
  *     summary: Get current customer's redemption history
- *     description: Returns the authenticated customer's own reward redemption history across active vendor memberships.
  *     tags:
  *       - Customers
  *     security:
  *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Customer redemption history retrieved successfully
- *       401:
- *         description: Authentication required
- *       403:
- *         description: Only customers can access this resource
- *       500:
- *         description: Failed to retrieve customer redemption history
  */
 router.get(
   '/me/redemptions',
@@ -537,7 +582,6 @@ router.get(
     try {
       const profileId = req.profile.id;
 
-      // Find all active vendor memberships for this customer
       const { data: customers, error: customerError } =
         await supabaseAdmin
           .from('customers')
@@ -616,10 +660,156 @@ router.get(
 
       return res.status(500).json({
         success: false,
-        message: 'Failed to retrieve customer redemption history'
+        message: 'Failed to retrieve redemption history'
       });
     }
   }
 );
+
+
+/**
+ * @swagger
+ * /api/customers/me/rewards:
+ *   get:
+ *     summary: Get current customer's rewards and eligibility
+ *     tags:
+ *       - Customers
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get(
+  '/me/rewards',
+  requireAuth,
+  requireRole('customer'),
+  async (req, res) => {
+    try {
+      const profileId = req.profile.id;
+
+      const { data: customer, error: customerError } =
+        await supabaseAdmin
+          .from('customers')
+          .select('id, tenant_id, status')
+          .eq('profile_id', profileId)
+          .eq('status', 'active')
+          .maybeSingle();
+
+      if (customerError || !customer) {
+        return res.status(404).json({
+          success: false,
+          message: 'Customer record not found'
+        });
+      }
+
+      const { data: loyaltyProgram, error: loyaltyError } =
+        await supabaseAdmin
+          .from('loyalty_programs')
+          .select(
+            'id, tenant_id, stamps_required, is_active'
+          )
+          .eq('tenant_id', customer.tenant_id)
+          .eq('is_active', true)
+          .maybeSingle();
+
+      if (loyaltyError) {
+        console.error(
+          'Customer rewards loyalty lookup error:',
+          loyaltyError
+        );
+
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to retrieve loyalty program'
+        });
+      }
+
+      const { data: rewards, error: rewardsError } =
+        await supabaseAdmin
+          .from('rewards')
+          .select(
+            'id, tenant_id, loyalty_program_id, name, description, stamps_required, is_active'
+          )
+          .eq('tenant_id', customer.tenant_id)
+          .eq('is_active', true)
+          .order('created_at', {
+            ascending: true
+          });
+
+      if (rewardsError) {
+        console.error(
+          'Customer rewards error:',
+          rewardsError
+        );
+
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to retrieve rewards'
+        });
+      }
+
+      const progress = await calculateCustomerProgress(
+        customer.tenant_id,
+        customer.id,
+        loyaltyProgram
+      );
+
+      const result = (rewards || []).map((reward) => {
+        const rewardRequired =
+          Number(reward.stamps_required) || 0;
+
+        const currentStamps =
+          progress.current_progress;
+
+        const eligible =
+          rewardRequired > 0 &&
+          currentStamps >= rewardRequired;
+
+        const stampsRemaining =
+          rewardRequired > 0
+            ? Math.max(
+                rewardRequired - currentStamps,
+                0
+              )
+            : 0;
+
+        return {
+          ...reward,
+
+          // Current available stamps, not lifetime stamps.
+          total_stamps: currentStamps,
+
+          stamps_remaining: stampsRemaining,
+
+          eligible
+        };
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Customer rewards retrieved successfully',
+        rewards: result,
+
+        progress: {
+          total_stamps: progress.total_stamps,
+          consumed_stamps: progress.consumed_stamps,
+          current_progress: progress.current_progress,
+          stamps_required: progress.stamps_required,
+          stamps_remaining: progress.remaining_stamps,
+          completed_cycles: progress.completed_cycles
+        }
+      });
+    } catch (error) {
+      console.error(
+        'Customer rewards route error:',
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to retrieve customer rewards'
+      });
+    }
+  }
+);
+
 
 module.exports = router;
