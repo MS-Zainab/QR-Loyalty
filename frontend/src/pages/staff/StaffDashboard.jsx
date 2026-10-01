@@ -369,7 +369,9 @@ const StaffDashboard = () => {
       );
 
       setVerifiedVisits((currentVisits) =>
-        currentVisits.filter((currentVisit) => currentVisit.id !== visit.id)
+        currentVisits.map((currentVisit) => 
+          currentVisit.id === visit.id ? { ...currentVisit, has_stamp: true } : currentVisit
+        )
       );
       setActivity((currentActivity) => ({
         ...currentActivity,
@@ -947,6 +949,7 @@ const StaffDashboard = () => {
                               type="button"
                               onClick={() => issueStamp(visit)}
                               disabled={
+                                visit.has_stamp ||
                                 stampingVisitId === visit.id ||
                                 !visit.id ||
                                 !visit.customer_id
@@ -956,18 +959,20 @@ const StaffDashboard = () => {
                                 border: 'none',
                                 borderRadius: '6px',
                                 backgroundColor:
-                                  stampingVisitId === visit.id
+                                  (visit.has_stamp || stampingVisitId === visit.id)
                                     ? '#9ca3af'
                                     : '#2563eb',
                                 color: '#ffffff',
                                 cursor:
-                                  stampingVisitId === visit.id
+                                  (visit.has_stamp || stampingVisitId === visit.id)
                                     ? 'not-allowed'
                                     : 'pointer',
                                 fontWeight: '600'
                               }}
                             >
-                              {stampingVisitId === visit.id
+                              {visit.has_stamp 
+                                ? 'Stamp Issued' 
+                                : stampingVisitId === visit.id
                                 ? 'Issuing...'
                                 : 'Issue Stamp'}
                             </button>

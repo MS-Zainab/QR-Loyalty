@@ -1,13 +1,17 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import api from '../services/api';
 import { logClientError } from '../services/logging';
 
 const Login = () => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const qrCodeFromUrl = searchParams.get('qr_code');
+
   const { login, customerLogin, resetPassword } = useAuth();
 
-  const [loginTab, setLoginTab] = useState('business'); // 'business' | 'customer'
+  const [loginTab, setLoginTab] = useState(qrCodeFromUrl ? 'customer' : 'business'); // 'business' | 'customer'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [customerName, setCustomerName] = useState('');
@@ -60,7 +64,16 @@ const Login = () => {
 
     try {
       await customerLogin(customerName, customerPhone);
-      navigate('/customer');
+      
+      if (qrCodeFromUrl) {
+        await api.post('/customers/register', {
+          qr_code: qrCodeFromUrl,
+          phone: customerPhone
+        });
+        navigate(`/customer/verify?qr_code=${encodeURIComponent(qrCodeFromUrl)}`);
+      } else {
+        navigate('/customer');
+      }
     } catch (err) {
       logClientError('Customer login failed', err);
       setError(err.message || 'Customer login failed.');

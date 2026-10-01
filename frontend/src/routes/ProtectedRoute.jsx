@@ -1,4 +1,4 @@
-import { Navigate, Outlet } from 'react-router-dom';
+import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 const ProtectedRoute = ({ allowedRoles }) => {
@@ -17,11 +17,14 @@ const ProtectedRoute = ({ allowedRoles }) => {
     );
   }
 
+  const { search, pathname } = useLocation();
+
   // User is not logged in
   if (!session || !profile) {
     return (
       <Navigate
-        to="/login"
+        to={`/login${search}`}
+        state={{ from: pathname }}
         replace
       />
     );

@@ -653,6 +653,14 @@ const CustomerDashboard = () => {
                 }}
               />
             </div>
+
+            <div style={{ marginTop: '16px', textAlign: 'center', fontWeight: 'bold', fontSize: '16px', color: remainingStamps === 0 ? '#166534' : '#1e293b' }}>
+              {remainingStamps > 1
+                ? `${remainingStamps} more visits to unlock your reward.`
+                : remainingStamps === 1
+                ? '1 more visit to unlock your reward.'
+                : 'Reward unlocked!'}
+            </div>
           </div>
         </section>
 

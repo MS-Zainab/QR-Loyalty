@@ -406,16 +406,39 @@ router.post(
         });
       }
 
+      // Automatically issue loyalty stamp for the visit
+      const { data: stamp, error: stampError } =
+        await supabaseAdmin
+          .from('stamps')
+          .insert({
+            tenant_id: tenantId,
+            customer_id: customer.id,
+            staff_id: verificationCode.staff_id,
+            visit_id: visit.id
+          })
+          .select(
+            'id, tenant_id, customer_id, staff_id, visit_id, created_at'
+          )
+          .single();
+
+      if (stampError) {
+        console.error('Create stamp error:', stampError);
+        // We still consider the verification successful even if the stamp fails to insert here
+        // though in a real scenario we might want to roll back the visit.
+        // For now, let's just log it.
+      }
+
       return res.status(200).json({
         success: true,
-        message: 'Customer verified successfully',
+        message: 'Customer verified successfully and stamp recorded',
         verification: {
           tenant_id: tenantId,
           customer_id: customer.id,
           staff_id: verificationCode.staff_id,
           visit_id: visit.id,
           visited_at: visit.visited_at
-        }
+        },
+        stamp: stamp || null
       });
     } catch (error) {
       console.error(

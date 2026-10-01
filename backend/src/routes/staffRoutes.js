@@ -355,17 +355,16 @@ router.get(
         });
       }
 
-      // Only keep visits that have not received a stamp yet
+      // We no longer filter out stamped visits, because the stamp is issued automatically upon verification.
+      // Instead, we mark them as having a stamp so the UI can disable the "Issue Stamp" button if needed.
       const stampedVisitIds = new Set(
         (stamps || []).map(
           (stamp) => stamp.visit_id
         )
       );
 
-      const pendingVisits = visits.filter(
-        (visit) =>
-          !stampedVisitIds.has(visit.id)
-      );
+      // Return all recent visits
+      const pendingVisits = visits;
 
       // Get customer information
       const customerIds = [
@@ -421,6 +420,7 @@ router.get(
           customer_id: visit.customer_id,
           staff_id: visit.staff_id,
           visited_at: visit.visited_at,
+          has_stamp: stampedVisitIds.has(visit.id),
           customer:
             customerMap.get(
               visit.customer_id
