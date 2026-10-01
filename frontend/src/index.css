@@ -55,11 +55,10 @@ body {
 }
 
 #root {
-  width: 1126px;
-  max-width: 100%;
+  width: 100%;
+  max-width: 1280px;
   margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
+  text-align: left;
   min-height: 100svh;
   display: flex;
   flex-direction: column;
@@ -109,3 +108,59 @@ code {
   padding: 4px 8px;
   background: var(--code-bg);
 }
+
+/* Global Responsive Improvements */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+@media (max-width: 640px) {
+  body {
+    font-size: 14px;
+  }
+
+  h1 {
+    font-size: 24px !important;
+    margin: 12px 0 !important;
+  }
+
+  h2 {
+    font-size: 18px !important;
+  }
+
+  header {
+    padding: 14px 16px !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+  }
+
+  header > div {
+    width: 100%;
+  }
+
+  header button {
+    width: 100%;
+    margin-top: 10px;
+  }
+
+  nav {
+    padding: 0 16px !important;
+    gap: 6px !important;
+  }
+
+  nav button {
+    padding: 10px 12px !important;
+    font-size: 13px !important;
+  }
+
+  main {
+    padding: 16px !important;
+  }
+
+  .responsive-table-wrapper {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+  }
+}
+

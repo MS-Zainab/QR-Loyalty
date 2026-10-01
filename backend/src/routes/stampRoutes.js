@@ -2,6 +2,7 @@ const express = require('express');
 
 const { requireAuth } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
+const { isUuid } = require('../middleware/validation');
 const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
@@ -60,10 +61,10 @@ router.post(
     try {
       const { customer_id, visit_id } = req.body;
 
-      if (!customer_id || !visit_id) {
+      if (!isUuid(customer_id) || !isUuid(visit_id)) {
         return res.status(400).json({
           success: false,
-          message: 'Customer ID and visit ID are required'
+          message: 'Valid customer ID and visit ID are required'
         });
       }
 

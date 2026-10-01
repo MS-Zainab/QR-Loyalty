@@ -3,6 +3,7 @@ const crypto = require('crypto');
 
 const { requireAuth } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
+const { createRateLimiter } = require('../middleware/rateLimit');
 const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
@@ -33,6 +34,11 @@ router.post(
   '/generate',
   requireAuth,
   requireRole('vendor_staff'),
+  createRateLimiter({
+    limit: 10,
+    windowMs: 60_000,
+    keyFor: (req) => [req.ip || 'unknown', req.user?.id]
+  }),
   async (req, res) => {
     try {
       const tenantId = req.profile.tenant_id;
@@ -195,14 +201,25 @@ router.post(
   '/verify',
   requireAuth,
   requireRole('customer'),
+  createRateLimiter({
+    limit: 10,
+    windowMs: 60_000,
+    keyFor: (req) => [req.ip || 'unknown', req.user?.id]
+  }),
   async (req, res) => {
     try {
       const { qr_code, pin } = req.body;
 
-      if (!qr_code || !pin) {
+      if (
+        typeof qr_code !== 'string' ||
+        qr_code.length === 0 ||
+        qr_code.length > 128 ||
+        typeof pin !== 'string' ||
+        !/^\d{6}$/.test(pin)
+      ) {
         return res.status(400).json({
           success: false,
-          message: 'QR code and PIN are required'
+          message: 'A valid QR code and 6-digit PIN are required'
         });
       }
 
@@ -277,18 +294,25 @@ router.post(
       }
 
       // Find customer belonging to this vendor
-      const {
-        data: customer,
-        error: customerError
-      } = await supabaseAdmin
-        .from('customers')
-        .select(
-          'id, tenant_id, profile_id, name, status'
-        )
-        .eq('tenant_id', tenantId)
-        .eq('profile_id', req.profile.id)
-        .eq('status', 'active')
-        .maybeSingle();
+      const [
+        { data: customer, error: customerError },
+        { data: staff, error: staffError }
+      ] = await Promise.all([
+        supabaseAdmin
+          .from('customers')
+          .select('id, tenant_id, profile_id, name, status')
+          .eq('tenant_id', tenantId)
+          .eq('profile_id', req.profile.id)
+          .eq('status', 'active')
+          .maybeSingle(),
+        supabaseAdmin
+          .from('staff')
+          .select('id, is_active')
+          .eq('id', verificationCode.staff_id)
+          .eq('tenant_id', tenantId)
+          .eq('is_active', true)
+          .maybeSingle()
+      ]);
 
       if (customerError) {
         console.error(
@@ -309,15 +333,32 @@ router.post(
         });
       }
 
+      if (staffError) {
+        console.error('PIN staff status lookup error:', staffError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to verify PIN'
+        });
+      }
+
+      if (!staff?.is_active) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid or already used PIN'
+        });
+      }
+
       // Mark PIN as used
-      const { error: markUsedError } =
+      const { data: usedVerificationCode, error: markUsedError } =
         await supabaseAdmin
           .from('verification_codes')
           .update({
             is_used: true
           })
           .eq('id', verificationCode.id)
-          .eq('is_used', false);
+          .eq('is_used', false)
+          .select('id')
+          .maybeSingle();
 
       if (markUsedError) {
         console.error(
@@ -328,6 +369,13 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Failed to complete PIN verification'
+        });
+      }
+
+      if (!usedVerificationCode) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid or already used PIN'
         });
       }
 

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
+import { logClientError } from '../../services/logging';
 
 const StaffDashboard = () => {
   const { session, profile, logout } = useAuth();
@@ -10,17 +11,24 @@ const StaffDashboard = () => {
 
   const [activity, setActivity] = useState(null);
   const [verifiedVisits, setVerifiedVisits] = useState([]);
+  const [rewards, setRewards] = useState([]);
+  const [selectedRewardByVisit, setSelectedRewardByVisit] = useState({});
 
   const [loading, setLoading] = useState(true);
+  const loadedForUser = useRef(null);
+  const [loadedForUserId, setLoadedForUserId] = useState(null);
   const [generatingPin, setGeneratingPin] = useState(false);
+  const [stampingVisitId, setStampingVisitId] = useState(null);
+  const [redeemingVisitId, setRedeemingVisitId] = useState(null);
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  const getConfig = () => ({
+  const getConfig = (signal) => ({
     headers: {
       Authorization: `Bearer ${session?.access_token}`
-    }
+    },
+    ...(signal ? { signal } : {})
   });
 
   const getDisplayValue = (value, fallback = '-') => {
@@ -93,27 +101,50 @@ const StaffDashboard = () => {
     return fallback;
   };
 
-  const loadStaffData = async () => {
+  const loadStaffData = async (signal) => {
     try {
       setLoading(true);
       setError('');
 
-      const config = getConfig();
+      const config = getConfig(signal);
 
       const [
         activityResponse,
-        visitsResponse
+        visitsResponse,
+        rewardsResponse
       ] = await Promise.all([
         api.get('/staff/activity', config),
         api.get(
           '/staff/verified-visits',
           config
-        )
+        ),
+        api.get('/rewards', config)
       ]);
 
-      setActivity(
-        activityResponse.data || null
-      );
+      if (signal?.aborted) return;
+
+      const activityData =
+        activityResponse.data?.activity ||
+        activityResponse.data ||
+        null;
+      const activityStatistics =
+        activityData?.statistics ||
+        activityData ||
+        {};
+
+      setActivity({
+        ...activityData,
+        stamps_issued:
+          activityStatistics.total_stamps_issued ??
+          activityStatistics.stamps_issued ??
+          activityStatistics.stampsIssued ??
+          0,
+        rewards_redeemed:
+          activityStatistics.total_rewards_redeemed ??
+          activityStatistics.rewards_redeemed ??
+          activityStatistics.rewardsRedeemed ??
+          0
+      });
 
       const visitsData =
         visitsResponse.data?.visits ||
@@ -126,11 +157,12 @@ const StaffDashboard = () => {
           ? visitsData
           : []
       );
-    } catch (err) {
-      console.error(
-        'Failed to load staff dashboard:',
-        err
+      setRewards(
+        rewardsResponse.data?.rewards || []
       );
+    } catch (err) {
+      if (signal?.aborted) return;
+      logClientError('Failed to load staff dashboard', err);
 
       setError(
         err?.response?.data?.message ||
@@ -138,15 +170,33 @@ const StaffDashboard = () => {
         'Failed to load staff dashboard.'
       );
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   };
 
+  const loadStaffDataEffect = useEffectEvent(loadStaffData);
+
   useEffect(() => {
-    if (session?.access_token) {
-      loadStaffData();
-    }
-  }, [session]);
+    const userId = session?.user?.id;
+    if (!userId || loadedForUser.current === userId) return;
+    loadedForUser.current = userId;
+    setPin('');
+    setPinExpiresAt(null);
+    setActivity(null);
+    setVerifiedVisits([]);
+    setRewards([]);
+    setSelectedRewardByVisit({});
+    setLoadedForUserId(userId);
+    const controller = new AbortController();
+    loadStaffDataEffect(controller.signal);
+
+    return () => {
+      controller.abort();
+      if (loadedForUser.current === userId) {
+        loadedForUser.current = null;
+      }
+    };
+  }, [session?.user?.id]);
 
   const generatePin = async () => {
     try {
@@ -158,11 +208,6 @@ const StaffDashboard = () => {
         '/verification/generate',
         {},
         getConfig()
-      );
-
-      console.log(
-        'Verification PIN response:',
-        response.data
       );
 
       const findPin = (data) => {
@@ -277,11 +322,6 @@ const StaffDashboard = () => {
       );
 
       if (!generatedPin) {
-        console.error(
-          'PIN was not found in response:',
-          response.data
-        );
-
         setError(
           'PIN was generated, but its value was not found in the server response.'
         );
@@ -296,10 +336,7 @@ const StaffDashboard = () => {
         'Verification PIN generated successfully. It is valid for 60 seconds.'
       );
     } catch (err) {
-      console.error(
-        'Failed to generate PIN:',
-        err
-      );
+      logClientError('Failed to generate PIN', err);
 
       setError(
         err?.response?.data?.message ||
@@ -311,18 +348,99 @@ const StaffDashboard = () => {
     }
   };
 
+  const issueStamp = async (visit) => {
+    if (!visit?.id || !visit?.customer_id) {
+      setError('This visit is missing its customer or visit identifier.');
+      return;
+    }
+
+    try {
+      setStampingVisitId(visit.id);
+      setError('');
+      setSuccess('');
+
+      const response = await api.post(
+        '/stamps',
+        {
+          customer_id: visit.customer_id,
+          visit_id: visit.id
+        },
+        getConfig()
+      );
+
+      setVerifiedVisits((currentVisits) =>
+        currentVisits.filter((currentVisit) => currentVisit.id !== visit.id)
+      );
+      setActivity((currentActivity) => ({
+        ...currentActivity,
+        stamps_issued:
+          Number(currentActivity?.stamps_issued || 0) + 1
+      }));
+      setSuccess(
+        response.data?.message ||
+          'Loyalty stamp issued successfully.'
+      );
+    } catch (err) {
+      logClientError('Failed to issue stamp', err);
+      setError(
+        err?.response?.data?.message ||
+          err?.response?.data?.error ||
+          'Failed to issue loyalty stamp.'
+      );
+    } finally {
+      setStampingVisitId(null);
+    }
+  };
+
+  const redeemReward = async (visit) => {
+    const rewardId = selectedRewardByVisit[visit?.id];
+
+    if (!rewardId) {
+      setError('Choose a reward before redeeming it.');
+      return;
+    }
+
+    try {
+      setRedeemingVisitId(visit.id);
+      setError('');
+      setSuccess('');
+
+      const response = await api.post(
+        `/rewards/${rewardId}/redeem`,
+        { customer_id: visit.customer_id },
+        getConfig()
+      );
+
+      setActivity((currentActivity) => ({
+        ...currentActivity,
+        rewards_redeemed:
+          Number(currentActivity?.rewards_redeemed || 0) + 1
+      }));
+      setSuccess(
+        response.data?.message ||
+          'Reward redeemed successfully.'
+      );
+    } catch (err) {
+      logClientError('Failed to redeem reward', err);
+      setError(
+        err?.response?.data?.message ||
+          err?.response?.data?.error ||
+          'Failed to redeem reward.'
+      );
+    } finally {
+      setRedeemingVisitId(null);
+    }
+  };
+
   const handleLogout = async () => {
     try {
       await logout();
     } catch (err) {
-      console.error(
-        'Logout failed:',
-        err
-      );
+      logClientError('Logout failed', err);
     }
   };
 
-  if (loading) {
+  if (loading || loadedForUserId !== session?.user?.id) {
     return (
       <div
         style={{
@@ -702,7 +820,7 @@ const StaffDashboard = () => {
                   width: '100%',
                   borderCollapse:
                     'collapse',
-                  minWidth: '650px'
+                minWidth: '900px'
                 }}
               >
                 <thead>
@@ -745,6 +863,26 @@ const StaffDashboard = () => {
                     >
                       Status
                     </th>
+
+                    <th
+                      style={{
+                        textAlign: 'left',
+                        padding: '12px',
+                        borderBottom: '1px solid #e5e7eb'
+                      }}
+                    >
+                      Action
+                    </th>
+
+                    <th
+                      style={{
+                        textAlign: 'left',
+                        padding: '12px',
+                        borderBottom: '1px solid #e5e7eb'
+                      }}
+                    >
+                      Redeem Reward
+                    </th>
                   </tr>
                 </thead>
 
@@ -769,6 +907,7 @@ const StaffDashboard = () => {
                       const verifiedAt =
                         visit?.verified_at ||
                         visit?.verifiedAt ||
+                        visit?.visited_at ||
                         visit?.created_at ||
                         visit?.createdAt ||
                         null;
@@ -796,6 +935,90 @@ const StaffDashboard = () => {
                               customerName,
                               'Customer'
                             )}
+                          </td>
+
+                          <td
+                            style={{
+                              padding: '12px',
+                              borderBottom: '1px solid #f1f5f9'
+                            }}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => issueStamp(visit)}
+                              disabled={
+                                stampingVisitId === visit.id ||
+                                !visit.id ||
+                                !visit.customer_id
+                              }
+                              style={{
+                                padding: '8px 12px',
+                                border: 'none',
+                                borderRadius: '6px',
+                                backgroundColor:
+                                  stampingVisitId === visit.id
+                                    ? '#9ca3af'
+                                    : '#2563eb',
+                                color: '#ffffff',
+                                cursor:
+                                  stampingVisitId === visit.id
+                                    ? 'not-allowed'
+                                    : 'pointer',
+                                fontWeight: '600'
+                              }}
+                            >
+                              {stampingVisitId === visit.id
+                                ? 'Issuing...'
+                                : 'Issue Stamp'}
+                            </button>
+                          </td>
+
+                          <td
+                            style={{
+                              padding: '12px',
+                              borderBottom: '1px solid #f1f5f9'
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px'
+                              }}
+                            >
+                              <select
+                                aria-label={`Choose reward for ${getDisplayValue(customerName, 'customer')}`}
+                                value={selectedRewardByVisit[visit.id] || ''}
+                                onChange={(event) =>
+                                  setSelectedRewardByVisit((current) => ({
+                                    ...current,
+                                    [visit.id]: event.target.value
+                                  }))
+                                }
+                                disabled={rewards.length === 0}
+                              >
+                                <option value="">
+                                  Choose reward
+                                </option>
+                                {rewards.map((reward) => (
+                                  <option key={reward.id} value={reward.id}>
+                                    {reward.name}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={() => redeemReward(visit)}
+                                disabled={
+                                  !selectedRewardByVisit[visit.id] ||
+                                  redeemingVisitId === visit.id
+                                }
+                              >
+                                {redeemingVisitId === visit.id
+                                  ? 'Redeeming...'
+                                  : 'Redeem'}
+                              </button>
+                            </div>
                           </td>
 
                           <td

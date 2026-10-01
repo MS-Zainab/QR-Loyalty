@@ -1,29 +1,19 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-
-import Login from './pages/Login';
-
-import CustomerDashboard from './pages/customer/CustomerDashboard';
-import VerifyVisit from './pages/customer/VerifyVisit';
-
-import StaffDashboard from './pages/staff/StaffDashboard';
-import OwnerDashboard from './pages/owner/OwnerDashboard';
 
 import ProtectedRoute from './routes/ProtectedRoute';
 
-import AdminDashboard from './pages/admin/AdminDashboard';
-
-const Placeholder = ({ title }) => {
-  return (
-    <div>
-      <h1>{title}</h1>
-      <p>Dashboard coming next.</p>
-    </div>
-  );
-};
+const Login = lazy(() => import('./pages/Login'));
+const CustomerDashboard = lazy(() => import('./pages/customer/CustomerDashboard'));
+const VerifyVisit = lazy(() => import('./pages/customer/VerifyVisit'));
+const StaffDashboard = lazy(() => import('./pages/staff/StaffDashboard'));
+const OwnerDashboard = lazy(() => import('./pages/owner/OwnerDashboard'));
+const AdminDashboard = lazy(() => import('./pages/admin/AdminDashboard'));
 
 function App() {
   return (
     <BrowserRouter>
+      <Suspense fallback={<div className="page-loading" role="status">Loading page…</div>}>
       <Routes>
 
         {/* Public route */}
@@ -115,6 +105,7 @@ function App() {
         />
 
       </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 }

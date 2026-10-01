@@ -1,7 +1,8 @@
 
-import { useEffect, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
+import { logClientError } from '../../services/logging';
 
 const CustomerDashboard = () => {
   const { session, profile, logout } = useAuth();
@@ -13,11 +14,14 @@ const CustomerDashboard = () => {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const loadedForUser = useRef(null);
+  const [loadedForUserId, setLoadedForUserId] = useState(null);
 
-  const getConfig = () => ({
+  const getConfig = (signal) => ({
     headers: {
       Authorization: `Bearer ${session?.access_token}`
-    }
+    },
+    ...(signal ? { signal } : {})
   });
 
   const getDisplayValue = (
@@ -66,20 +70,18 @@ const CustomerDashboard = () => {
     return date.toLocaleString();
   };
 
-  const loadCustomerData = async () => {
+  const loadCustomerData = async (signal) => {
     try {
       setLoading(true);
       setError('');
 
-      const config = getConfig();
+      const config = getConfig(signal);
 
       const [
-        customerResponse,
         stampsResponse,
         redemptionsResponse,
         rewardsResponse
       ] = await Promise.all([
-        api.get('/customers/me', config),
         api.get('/customers/me/stamps', config),
         api.get(
           '/customers/me/redemptions',
@@ -88,34 +90,66 @@ const CustomerDashboard = () => {
         api.get('/customers/me/rewards', config)
       ]);
 
-      setCustomer(
-        customerResponse.data || null
-      );
+      if (signal?.aborted) return;
 
-      const stampData =
-        stampsResponse.data?.stamps ||
-        stampsResponse.data?.data ||
-        stampsResponse.data ||
-        [];
+      const progressData =
+        rewardsResponse.data?.progress ||
+        {};
 
-      setStamps(
-        Array.isArray(stampData)
-          ? stampData
-          : []
-      );
+      const stampHistory =
+        stampsResponse.data?.stamp_history;
+      const stampData = Array.isArray(stampHistory)
+        ? stampHistory.flatMap((group) =>
+            (group?.stamps || []).map((stamp) => ({
+              ...stamp,
+              customer_id: group.customer_id,
+              customer_name: group.customer_name,
+              tenant_id: group.tenant_id
+            }))
+          )
+        : stampsResponse.data?.stamps ||
+          stampsResponse.data?.data ||
+          stampsResponse.data ||
+          [];
+      const normalizedStamps = Array.isArray(stampData)
+        ? stampData.sort((a, b) =>
+            new Date(b?.created_at || 0) -
+            new Date(a?.created_at || 0)
+          )
+        : [];
 
-      const redemptionData =
-        redemptionsResponse.data
-          ?.redemptions ||
-        redemptionsResponse.data?.data ||
-        redemptionsResponse.data ||
-        [];
+      const redemptionHistory =
+        redemptionsResponse.data?.redemption_history;
+      const redemptionData = Array.isArray(redemptionHistory)
+        ? redemptionHistory.flatMap((group) =>
+            (group?.redemptions || []).map((redemption) => ({
+              ...redemption,
+              customer_id: group.customer_id,
+              customer_name: group.customer_name,
+              tenant_id: group.tenant_id
+            }))
+          )
+        : redemptionsResponse.data?.redemptions ||
+          redemptionsResponse.data?.data ||
+          redemptionsResponse.data ||
+          [];
+      const normalizedRedemptions = Array.isArray(redemptionData)
+        ? redemptionData.sort((a, b) =>
+            new Date(b?.redeemed_at || b?.created_at || 0) -
+            new Date(a?.redeemed_at || a?.created_at || 0)
+          )
+        : [];
 
-      setRedemptions(
-        Array.isArray(redemptionData)
-          ? redemptionData
-          : []
-      );
+      setCustomer({
+        current_stamps:
+          progressData.current_progress ?? 0,
+        stamp_target:
+          progressData.stamps_required ?? 10,
+        rewards_redeemed:
+          normalizedRedemptions.length
+      });
+      setStamps(normalizedStamps);
+      setRedemptions(normalizedRedemptions);
 
       const rewardData =
         rewardsResponse.data?.rewards ||
@@ -129,10 +163,8 @@ const CustomerDashboard = () => {
           : []
       );
     } catch (err) {
-      console.error(
-        'Failed to load customer dashboard:',
-        err
-      );
+      if (signal?.aborted) return;
+      logClientError('Failed to load customer dashboard', err);
 
       setError(
         err?.response?.data?.message ||
@@ -140,24 +172,37 @@ const CustomerDashboard = () => {
         'Failed to load customer dashboard.'
       );
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   };
 
+  const loadCustomerDataEffect = useEffectEvent(loadCustomerData);
+
   useEffect(() => {
-    if (session?.access_token) {
-      loadCustomerData();
-    }
-  }, [session]);
+    const userId = session?.user?.id;
+    if (!userId || loadedForUser.current === userId) return;
+    loadedForUser.current = userId;
+    setCustomer(null);
+    setStamps([]);
+    setRedemptions([]);
+    setRewards([]);
+    setLoadedForUserId(userId);
+    const controller = new AbortController();
+    loadCustomerDataEffect(controller.signal);
+
+    return () => {
+      controller.abort();
+      if (loadedForUser.current === userId) {
+        loadedForUser.current = null;
+      }
+    };
+  }, [session?.user?.id]);
 
   const handleLogout = async () => {
     try {
       await logout();
     } catch (err) {
-      console.error(
-        'Logout failed:',
-        err
-      );
+      logClientError('Logout failed', err);
     }
   };
 
@@ -189,7 +234,7 @@ const CustomerDashboard = () => {
     return fallback;
   };
 
-  if (loading) {
+  if (loading || loadedForUserId !== session?.user?.id) {
     return (
       <div
         style={{
@@ -386,23 +431,36 @@ const CustomerDashboard = () => {
             your visit.
           </p>
 
-          <button
-            onClick={() =>
-              (window.location.href =
-                '/customer/verify')
-            }
+          <p
             style={{
-              padding: '12px 20px',
-              border: 'none',
-              borderRadius: '8px',
-              backgroundColor:
-                '#2563eb',
-              color: '#ffffff',
-              cursor: 'pointer',
-              fontWeight: '600'
+              marginBottom: '16px',
+              color: '#6b7280',
+              fontSize: '14px'
             }}
           >
-            Verify Visit
+            Use your phone camera to scan the business QR code or click the button below to launch camera scanner / manual code entry.
+          </p>
+
+          <button
+            type="button"
+            onClick={() => navigate('/customer/verify')}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px',
+              backgroundColor: '#2563eb',
+              color: '#ffffff',
+              padding: '12px 24px',
+              borderRadius: '8px',
+              border: 'none',
+              fontWeight: '600',
+              fontSize: '15px',
+              cursor: 'pointer',
+              boxShadow: '0 2px 4px rgba(37,99,235,0.2)'
+            }}
+          >
+            📷 Scan Shop QR & Verify Visit
           </button>
         </section>
 
@@ -1109,4 +1167,3 @@ const CustomerDashboard = () => {
 };
 
 export default CustomerDashboard;
-

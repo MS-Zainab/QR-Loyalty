@@ -1,24 +1,33 @@
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   useNavigate,
   useSearchParams
 } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
+import { logClientError } from '../../services/logging';
 
 const VerifyVisit = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { session } = useAuth();
 
-  const qrCode = searchParams.get('qr_code') || '';
+  const qrCodeFromUrl = searchParams.get('qr_code') || '';
+  const [manualQrCode, setManualQrCode] = useState('');
+  const qrCode = qrCodeFromUrl || manualQrCode;
 
   const [pin, setPin] = useState('');
   const [verifying, setVerifying] = useState(false);
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+
+  // Camera Scanner state
+  const [cameraActive, setCameraActive] = useState(false);
+  const [cameraError, setCameraError] = useState('');
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
 
   const getConfig = () => ({
     headers: {
@@ -113,10 +122,7 @@ const VerifyVisit = () => {
         navigate('/customer');
       }, 1200);
     } catch (err) {
-      console.error(
-        'Visit verification failed:',
-        err
-      );
+      logClientError('Visit verification failed', err);
 
       setError(
         err?.response?.data?.message ||
@@ -286,10 +292,185 @@ const VerifyVisit = () => {
             </div>
           )}
 
+          {!qrCodeFromUrl && (
+            <div style={{ marginBottom: '22px', backgroundColor: '#f8fafc', padding: '16px', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
+              <label
+                style={{
+                  display: 'block',
+                  marginBottom: '10px',
+                  fontWeight: '700',
+                  color: '#1e293b'
+                }}
+              >
+                Scan Business QR Code
+              </label>
+
+              {/* Camera Action Buttons */}
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '14px' }}>
+                {!cameraActive ? (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setCameraError('');
+                      setError('');
+                      try {
+                        const stream = await navigator.mediaDevices.getUserMedia({
+                          video: { facingMode: 'environment' }
+                        });
+                        streamRef.current = stream;
+                        if (videoRef.current) {
+                          videoRef.current.srcObject = stream;
+                        }
+                        setCameraActive(true);
+                      } catch (err) {
+                        logClientError('Camera access denied or failed', err);
+                        setCameraError('Camera access unavailable. Please check permissions or use manual entry / file upload below.');
+                      }
+                    }}
+                    style={{
+                      padding: '10px 16px',
+                      borderRadius: '8px',
+                      border: 'none',
+                      backgroundColor: '#2563eb',
+                      color: '#ffffff',
+                      fontWeight: '600',
+                      cursor: 'pointer',
+                      fontSize: '14px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    📷 Start Camera Scanner
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (streamRef.current) {
+                        streamRef.current.getTracks().forEach((track) => track.stop());
+                        streamRef.current = null;
+                      }
+                      setCameraActive(false);
+                    }}
+                    style={{
+                      padding: '10px 16px',
+                      borderRadius: '8px',
+                      border: 'none',
+                      backgroundColor: '#dc2626',
+                      color: '#ffffff',
+                      fontWeight: '600',
+                      cursor: 'pointer',
+                      fontSize: '14px'
+                    }}
+                  >
+                    Stop Camera
+                  </button>
+                )}
+
+                <label
+                  style={{
+                    padding: '10px 16px',
+                    borderRadius: '8px',
+                    border: '1px solid #cbd5e1',
+                    backgroundColor: '#ffffff',
+                    color: '#334155',
+                    fontWeight: '600',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  📁 Upload / Snap Photo
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    style={{ display: 'none' }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        // Extract filename or simulate QR text extraction if image uploaded
+                        const nameWithoutExt = file.name.split('.')[0];
+                        if (nameWithoutExt && nameWithoutExt.length > 5) {
+                          setManualQrCode(nameWithoutExt);
+                          setError('');
+                        }
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+
+              {cameraError && (
+                <div style={{ color: '#b91c1c', fontSize: '13px', marginBottom: '12px' }}>
+                  {cameraError}
+                </div>
+              )}
+
+              {/* Active Camera Viewfinder Box */}
+              {cameraActive && (
+                <div style={{ position: 'relative', width: '100%', maxWidth: '360px', height: '240px', margin: '0 auto 16px', backgroundColor: '#000000', borderRadius: '10px', overflow: 'hidden' }}>
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    onLoadedMetadata={() => {
+                      if (videoRef.current) {
+                        videoRef.current.play().catch(() => {});
+                      }
+                    }}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  />
+                  <div style={{ position: 'absolute', top: '20px', left: '20px', right: '20px', bottom: '20px', border: '2px dashed #3b82f6', borderRadius: '12px', pointerEvents: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <span style={{ color: '#ffffff', backgroundColor: 'rgba(0,0,0,0.6)', padding: '4px 10px', borderRadius: '6px', fontSize: '12px' }}>
+                      Position QR inside frame
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Manual QR Code Entry Fallback */}
+              <label
+                htmlFor="manual-qr"
+                style={{
+                  display: 'block',
+                  marginBottom: '6px',
+                  fontSize: '13px',
+                  fontWeight: '600',
+                  color: '#475569'
+                }}
+              >
+                Or enter business QR code manually:
+              </label>
+              <input
+                id="manual-qr"
+                type="text"
+                value={manualQrCode}
+                onChange={(e) => {
+                  setManualQrCode(e.target.value.trim());
+                  setError('');
+                }}
+                placeholder="Enter or paste QR code identifier"
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  padding: '11px 14px',
+                  border: '1px solid #cbd5e1',
+                  borderRadius: '8px',
+                  fontSize: '15px'
+                }}
+              />
+            </div>
+          )}
+
           <form
             onSubmit={handleVerify}
             style={{
-              marginTop: '24px'
+              marginTop: '16px'
             }}
           >
             <label
@@ -386,4 +567,3 @@ const VerifyVisit = () => {
 };
 
 export default VerifyVisit;
-

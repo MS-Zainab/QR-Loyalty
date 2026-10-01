@@ -31,106 +31,68 @@ router.get(
   requireRole('admin'),
   async (req, res) => {
     try {
-      const { data: tenants, error: tenantsError } =
-        await supabaseAdmin
+      const [
+        { data: tenants, error: tenantsError },
+        { count: totalCustomers, error: customersError },
+        { count: activeCustomers, error: activeCustomersError },
+        { count: totalStamps, error: stampsError },
+        { count: totalRewards, error: rewardsError },
+        { count: activeRewards, error: activeRewardsError },
+        { count: totalRedemptions, error: redemptionsError },
+        { count: totalStaff, error: staffError },
+        { count: activeStaff, error: activeStaffError }
+      ] = await Promise.all([
+        supabaseAdmin
           .from('tenants')
           .select('id, business_name, status, created_at')
-          .order('created_at', { ascending: false });
-
-      if (tenantsError) {
-        console.error(
-          'Admin tenants query error:',
-          tenantsError
-        );
-
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve vendor data'
-        });
-      }
-
-      const { data: customers, error: customersError } =
-        await supabaseAdmin
+          .order('created_at', { ascending: false }),
+        supabaseAdmin
           .from('customers')
-          .select('id, tenant_id, status');
-
-      if (customersError) {
-        console.error(
-          'Admin customers query error:',
-          customersError
-        );
-
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve customer data'
-        });
-      }
-
-      const { data: stamps, error: stampsError } =
-        await supabaseAdmin
+          .select('id', { count: 'exact', head: true }),
+        supabaseAdmin
+          .from('customers')
+          .select('id', { count: 'exact', head: true })
+          .eq('status', 'active'),
+        supabaseAdmin
           .from('stamps')
-          .select('id, tenant_id');
-
-      if (stampsError) {
-        console.error(
-          'Admin stamps query error:',
-          stampsError
-        );
-
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve stamp data'
-        });
-      }
-
-      const { data: rewards, error: rewardsError } =
-        await supabaseAdmin
+          .select('id', { count: 'exact', head: true }),
+        supabaseAdmin
           .from('rewards')
-          .select('id, tenant_id, is_active');
-
-      if (rewardsError) {
-        console.error(
-          'Admin rewards query error:',
-          rewardsError
-        );
-
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve reward data'
-        });
-      }
-
-      const { data: redemptions, error: redemptionsError } =
-        await supabaseAdmin
+          .select('id', { count: 'exact', head: true }),
+        supabaseAdmin
+          .from('rewards')
+          .select('id', { count: 'exact', head: true })
+          .eq('is_active', true),
+        supabaseAdmin
           .from('redemptions')
-          .select('id, tenant_id');
-
-      if (redemptionsError) {
-        console.error(
-          'Admin redemptions query error:',
-          redemptionsError
-        );
-
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve redemption data'
-        });
-      }
-
-      const { data: staff, error: staffError } =
-        await supabaseAdmin
+          .select('id', { count: 'exact', head: true }),
+        supabaseAdmin
           .from('staff')
-          .select('id, tenant_id, is_active');
+          .select('id', { count: 'exact', head: true }),
+        supabaseAdmin
+          .from('staff')
+          .select('id', { count: 'exact', head: true })
+          .eq('is_active', true)
+      ]);
 
-      if (staffError) {
-        console.error(
-          'Admin staff query error:',
-          staffError
-        );
+      const queryErrors = [
+        [tenantsError, 'vendor'],
+        [customersError, 'customer'],
+        [activeCustomersError, 'active customer'],
+        [stampsError, 'stamp'],
+        [rewardsError, 'reward'],
+        [activeRewardsError, 'active reward'],
+        [redemptionsError, 'redemption'],
+        [staffError, 'staff'],
+        [activeStaffError, 'active staff']
+      ];
+      const failedQuery = queryErrors.find(([error]) => error);
 
+      if (failedQuery) {
+        console.error(`Admin dashboard ${failedQuery[1]} query error:`, failedQuery[0]);
         return res.status(500).json({
           success: false,
-          message: 'Failed to retrieve staff data'
+          message: `Failed to retrieve ${failedQuery[1]} data`
         });
       }
 
@@ -149,21 +111,6 @@ router.get(
           (tenant) => tenant.status === 'removed'
         ).length;
 
-      const activeCustomers =
-        customers.filter(
-          (customer) => customer.status === 'active'
-        ).length;
-
-      const activeRewards =
-        rewards.filter(
-          (reward) => reward.is_active === true
-        ).length;
-
-      const activeStaff =
-        staff.filter(
-          (member) => member.is_active === true
-        ).length;
-
       return res.status(200).json({
         success: true,
         message: 'Admin dashboard retrieved successfully',
@@ -173,13 +120,13 @@ router.get(
             active_vendors: activeVendors,
             held_vendors: heldVendors,
             removed_vendors: removedVendors,
-            total_customers: customers.length,
+            total_customers: totalCustomers || 0,
             active_customers: activeCustomers,
-            total_stamps: stamps.length,
-            total_rewards: rewards.length,
+            total_stamps: totalStamps || 0,
+            total_rewards: totalRewards || 0,
             active_rewards: activeRewards,
-            total_redemptions: redemptions.length,
-            total_staff: staff.length,
+            total_redemptions: totalRedemptions || 0,
+            total_staff: totalStaff || 0,
             active_staff: activeStaff
           },
           vendors: tenants
@@ -422,116 +369,50 @@ router.get(
   requireRole('admin'),
   async (req, res) => {
     try {
-      const { data: tenants, error: tenantsError } =
-        await supabaseAdmin
+      const [
+        { data: tenants, error: tenantsError },
+        { data: customers, error: customersError },
+        { data: stamps, error: stampsError },
+        { data: rewards, error: rewardsError },
+        { data: redemptions, error: redemptionsError },
+        { data: staff, error: staffError }
+      ] = await Promise.all([
+        supabaseAdmin
           .from('tenants')
           .select('id, business_name, status, created_at')
-          .order('created_at', { ascending: false });
-
-      if (tenantsError) {
-        console.error(
-          'Admin reports tenants error:',
-          tenantsError
-        );
-
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve vendor report data'
-        });
-      }
-
-      const { data: customers, error: customersError } =
-        await supabaseAdmin
+          .order('created_at', { ascending: false }),
+        supabaseAdmin
           .from('customers')
-          .select(
-            'id, tenant_id, status, created_at'
-          );
-
-      if (customersError) {
-        console.error(
-          'Admin reports customers error:',
-          customersError
-        );
-
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve customer report data'
-        });
-      }
-
-      const { data: stamps, error: stampsError } =
-        await supabaseAdmin
+          .select('id, tenant_id, status, created_at'),
+        supabaseAdmin
           .from('stamps')
-          .select(
-            'id, tenant_id, customer_id, staff_id, visit_id, created_at'
-          );
-
-      if (stampsError) {
-        console.error(
-          'Admin reports stamps error:',
-          stampsError
-        );
-
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve stamp report data'
-        });
-      }
-
-      const { data: rewards, error: rewardsError } =
-        await supabaseAdmin
+          .select('id, tenant_id, customer_id, staff_id, visit_id, created_at'),
+        supabaseAdmin
           .from('rewards')
-          .select(
-            'id, tenant_id, name, stamps_required, is_active, created_at'
-          );
-
-      if (rewardsError) {
-        console.error(
-          'Admin reports rewards error:',
-          rewardsError
-        );
-
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve reward report data'
-        });
-      }
-
-      const { data: redemptions, error: redemptionsError } =
-        await supabaseAdmin
+          .select('id, tenant_id, name, stamps_required, is_active, created_at'),
+        supabaseAdmin
           .from('redemptions')
-          .select(
-            'id, tenant_id, customer_id, reward_id, staff_id, redeemed_at, created_at'
-          );
-
-      if (redemptionsError) {
-        console.error(
-          'Admin reports redemptions error:',
-          redemptionsError
-        );
-
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve redemption report data'
-        });
-      }
-
-      const { data: staff, error: staffError } =
-        await supabaseAdmin
+          .select('id, tenant_id, customer_id, reward_id, staff_id, redeemed_at, created_at'),
+        supabaseAdmin
           .from('staff')
-          .select(
-            'id, tenant_id, profile_id, is_active, created_at'
-          );
+          .select('id, tenant_id, profile_id, is_active, created_at')
+      ]);
 
-      if (staffError) {
-        console.error(
-          'Admin reports staff error:',
-          staffError
-        );
+      const queryErrors = [
+        [tenantsError, 'vendor'],
+        [customersError, 'customer'],
+        [stampsError, 'stamp'],
+        [rewardsError, 'reward'],
+        [redemptionsError, 'redemption'],
+        [staffError, 'staff']
+      ];
+      const failedQuery = queryErrors.find(([error]) => error);
 
+      if (failedQuery) {
+        console.error(`Admin reports ${failedQuery[1]} query error:`, failedQuery[0]);
         return res.status(500).json({
           success: false,
-          message: 'Failed to retrieve staff report data'
+          message: `Failed to retrieve ${failedQuery[1]} report data`
         });
       }
 
@@ -677,6 +558,274 @@ router.get(
       return res.status(500).json({
         success: false,
         message: 'Failed to retrieve platform reports'
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/admin/reports/monthly:
+ *   get:
+ *     summary: Get detailed monthly report for a tenant (Admin only)
+ *     description: Returns monthly tenant metrics, daily visit breakdown, customer frequency, and loyalty activity for a selected tenant and month.
+ *     tags:
+ *       - Admin
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: tenant_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *       - in: query
+ *         name: month
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2026-09"
+ *     responses:
+ *       200:
+ *         description: Monthly tenant report retrieved successfully
+ *       400:
+ *         description: Missing or invalid parameters
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Only platform admins can access this resource
+ *       404:
+ *         description: Tenant not found
+ *       500:
+ *         description: Failed to generate monthly report
+ */
+router.get(
+  '/reports/monthly',
+  requireAuth,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const { tenant_id, month } = req.query;
+
+      if (!tenant_id || !month || !/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid tenant_id (UUID) and month (YYYY-MM) are required'
+        });
+      }
+
+      // Fetch tenant
+      const { data: tenant, error: tenantError } = await supabaseAdmin
+        .from('tenants')
+        .select('id, business_name, status, created_at')
+        .eq('id', tenant_id)
+        .single();
+
+      if (tenantError || !tenant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Tenant not found'
+        });
+      }
+
+      const [yearStr, monthStr] = month.split('-');
+      const year = parseInt(yearStr, 10);
+      const monthIdx = parseInt(monthStr, 10) - 1; // 0-indexed month
+
+      const startDate = new Date(Date.UTC(year, monthIdx, 1, 0, 0, 0, 0));
+      const daysInMonth = new Date(Date.UTC(year, monthIdx + 1, 0)).getUTCDate();
+      const endDate = new Date(Date.UTC(year, monthIdx, daysInMonth, 23, 59, 59, 999));
+
+      const startIso = startDate.toISOString();
+      const endIso = endDate.toISOString();
+
+      // Parallel queries for selected tenant within time frame & baseline
+      const [
+        { data: visits, error: visitsError },
+        { data: allTenantCustomers, error: customersError },
+        { data: monthStamps, error: stampsError },
+        { data: monthRedemptions, error: redemptionsError },
+        { data: loyaltyProgram }
+      ] = await Promise.all([
+        supabaseAdmin
+          .from('visits')
+          .select('id, customer_id, visited_at')
+          .eq('tenant_id', tenant_id)
+          .gte('visited_at', startIso)
+          .lte('visited_at', endIso)
+          .order('visited_at', { ascending: true }),
+        supabaseAdmin
+          .from('customers')
+          .select('id, name, created_at')
+          .eq('tenant_id', tenant_id),
+        supabaseAdmin
+          .from('stamps')
+          .select('id, customer_id, created_at')
+          .eq('tenant_id', tenant_id)
+          .gte('created_at', startIso)
+          .lte('created_at', endIso),
+        supabaseAdmin
+          .from('redemptions')
+          .select('id, customer_id, reward_id, redeemed_at, created_at')
+          .eq('tenant_id', tenant_id)
+          .gte('created_at', startIso)
+          .lte('created_at', endIso),
+        supabaseAdmin
+          .from('loyalty_programs')
+          .select('id, name, stamps_required, reward_description, is_active')
+          .eq('tenant_id', tenant_id)
+          .eq('is_active', true)
+          .maybeSingle()
+      ]);
+
+      if (visitsError || customersError || stampsError || redemptionsError) {
+        console.error('Monthly report queries error:', visitsError || customersError || stampsError || redemptionsError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to query tenant monthly data'
+        });
+      }
+
+      // Fetch customer earliest visit date prior to or within month to determine repeat visits vs new customers
+      const { data: allPriorVisits } = await supabaseAdmin
+        .from('visits')
+        .select('customer_id, visited_at')
+        .eq('tenant_id', tenant_id)
+        .lt('visited_at', startIso);
+
+      const priorCustomerSet = new Set((allPriorVisits || []).map((v) => v.customer_id));
+
+      const totalVisits = (visits || []).length;
+      const visitedCustomerIds = new Set((visits || []).map((v) => v.customer_id));
+      const uniqueCustomersCount = visitedCustomerIds.size;
+
+      // Repeat visits: visits after the customer's first visit within the reporting period or customers who visited prior
+      let repeatVisits = 0;
+      const seenCustomerInPeriod = new Set();
+      for (const visit of (visits || [])) {
+        if (priorCustomerSet.has(visit.customer_id) || seenCustomerInPeriod.has(visit.customer_id)) {
+          repeatVisits += 1;
+        } else {
+          seenCustomerInPeriod.add(visit.customer_id);
+        }
+      }
+
+      // New customers: customers whose account created_at or first visit falls within the selected month
+      const newCustomers = (allTenantCustomers || []).filter((c) => {
+        const cDate = new Date(c.created_at);
+        return cDate >= startDate && cDate <= endDate;
+      }).length;
+
+      const avgVisitsPerCustomer = uniqueCustomersCount > 0
+        ? Number((totalVisits / uniqueCustomersCount).toFixed(2))
+        : 0;
+
+      // Daily Breakdown for every day in the month
+      const dailyMap = new Map();
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dayStr = `${yearStr}-${monthStr}-${String(d).padStart(2, '0')}`;
+        dailyMap.set(dayStr, {
+          date: dayStr,
+          visits: 0,
+          unique_customers: 0,
+          uniqueCustomerSet: new Set(),
+          stamps: 0,
+          redemptions: 0
+        });
+      }
+
+      for (const visit of (visits || [])) {
+        const dayStr = visit.visited_at.slice(0, 10);
+        if (dailyMap.has(dayStr)) {
+          const entry = dailyMap.get(dayStr);
+          entry.visits += 1;
+          entry.uniqueCustomerSet.add(visit.customer_id);
+        }
+      }
+
+      for (const stamp of (monthStamps || [])) {
+        const dayStr = stamp.created_at.slice(0, 10);
+        if (dailyMap.has(dayStr)) {
+          dailyMap.get(dayStr).stamps += 1;
+        }
+      }
+
+      for (const redemption of (monthRedemptions || [])) {
+        const rDate = redemption.redeemed_at || redemption.created_at;
+        const dayStr = rDate ? rDate.slice(0, 10) : '';
+        if (dailyMap.has(dayStr)) {
+          dailyMap.get(dayStr).redemptions += 1;
+        }
+      }
+
+      const dailyBreakdown = Array.from(dailyMap.values()).map((entry) => ({
+        date: entry.date,
+        visits: entry.visits,
+        unique_customers: entry.uniqueCustomerSet.size,
+        stamps: entry.stamps,
+        redemptions: entry.redemptions
+      }));
+
+      // Peak & Lowest Visit Day calculation
+      let peakDay = { date: '-', visits: 0 };
+      let lowestDay = { date: '-', visits: Infinity };
+
+      for (const day of dailyBreakdown) {
+        if (day.visits > peakDay.visits) {
+          peakDay = { date: day.date, visits: day.visits };
+        }
+        if (day.visits < lowestDay.visits) {
+          lowestDay = { date: day.date, visits: day.visits };
+        }
+      }
+      if (lowestDay.visits === Infinity) {
+        lowestDay = { date: dailyBreakdown[0]?.date || '-', visits: 0 };
+      }
+
+      // Customer Visit Frequency (Top customers by visit count in period, with safe masked names/ids)
+      const customerVisitCounts = new Map();
+      const customerNameMap = new Map((allTenantCustomers || []).map((c) => [c.id, c.name]));
+
+      for (const visit of (visits || [])) {
+        const count = customerVisitCounts.get(visit.customer_id) || 0;
+        customerVisitCounts.set(visit.customer_id, count + 1);
+      }
+
+      const customerFrequency = Array.from(customerVisitCounts.entries())
+        .map(([customerId, visitsCount]) => ({
+          customer_identifier: `Customer ${customerId.slice(0, 6)}... (${customerNameMap.get(customerId) || 'Member'})`,
+          visits: visitsCount
+        }))
+        .sort((a, b) => b.visits - a.visits);
+
+      return res.status(200).json({
+        success: true,
+        report: {
+          business_name: tenant.business_name,
+          tenant_id: tenant.id,
+          report_month: month,
+          summary: {
+            total_visits: totalVisits,
+            unique_customers: uniqueCustomersCount,
+            repeat_visits: repeatVisits,
+            new_customers: newCustomers,
+            avg_visits_per_customer: avgVisitsPerCustomer,
+            stamps_issued: (monthStamps || []).length,
+            rewards_redeemed: (monthRedemptions || []).length,
+            peak_visit_day: peakDay,
+            lowest_visit_day: lowestDay
+          },
+          daily_breakdown: dailyBreakdown,
+          customer_frequency: customerFrequency,
+          loyalty_program_status: loyaltyProgram || { status: 'No active loyalty program' }
+        }
+      });
+    } catch (error) {
+      console.error('Admin monthly report error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to generate monthly report'
       });
     }
   }
@@ -935,6 +1084,135 @@ router.get(
       return res.status(500).json({
         success: false,
         message: 'Failed to export platform reports'
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/admin/subscriptions:
+ *   get:
+ *     summary: Get all tenant subscriptions for Admin
+ */
+router.get(
+  '/subscriptions',
+  requireAuth,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const { data: tenants } = await supabaseAdmin
+        .from('tenants')
+        .select('id, business_name, status, created_at')
+        .order('created_at', { ascending: false });
+
+      const { data: subscriptions } = await supabaseAdmin
+        .from('subscriptions')
+        .select('*');
+
+      const subMap = new Map((subscriptions || []).map((sub) => [sub.tenant_id, sub]));
+
+      const tenantSubscriptions = (tenants || []).map((t) => {
+        const sub = subMap.get(t.id);
+        const createdAt = new Date(t.created_at || Date.now());
+        const trialEnds = new Date(createdAt.getTime() + 14 * 24 * 60 * 60 * 1000);
+        const daysLeft = sub?.current_period_end
+          ? Math.max(0, Math.ceil((new Date(sub.current_period_end) - new Date()) / (1000 * 60 * 60 * 24)))
+          : Math.max(0, Math.ceil((trialEnds - new Date()) / (1000 * 60 * 60 * 24)));
+
+        return {
+          tenant_id: t.id,
+          business_name: t.business_name,
+          tenant_status: t.status,
+          plan_type: sub?.plan_type || 'trial',
+          status: sub?.status || (daysLeft > 0 ? 'active' : 'expired'),
+          amount_paid: sub?.amount_paid || 0,
+          billing_cycle: sub?.billing_cycle || 'monthly',
+          days_left: daysLeft,
+          current_period_end: sub?.current_period_end || trialEnds.toISOString()
+        };
+      });
+
+      const totalPaid = tenantSubscriptions.filter((s) => s.plan_type !== 'trial' && s.status === 'active').length;
+      const totalTrial = tenantSubscriptions.filter((s) => s.plan_type === 'trial' && s.status === 'active').length;
+      const totalExpired = tenantSubscriptions.filter((s) => s.status === 'expired').length;
+
+      return res.status(200).json({
+        success: true,
+        summary: {
+          total_paid_tenants: totalPaid,
+          active_trials: totalTrial,
+          expired_subscriptions: totalExpired
+        },
+        subscriptions: tenantSubscriptions
+      });
+    } catch (error) {
+      console.error('Admin subscriptions error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to retrieve subscription data'
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/admin/subscriptions/{tenantId}:
+ *   patch:
+ *     summary: Override tenant subscription plan
+ */
+router.patch(
+  '/subscriptions/:tenantId',
+  requireAuth,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const { tenantId } = req.params;
+      const { plan_type, status, days_to_add = 30 } = req.body || {};
+
+      const periodEnd = new Date(Date.now() + days_to_add * 24 * 60 * 60 * 1000).toISOString();
+
+      const { data: existing } = await supabaseAdmin
+        .from('subscriptions')
+        .select('id')
+        .eq('tenant_id', tenantId)
+        .maybeSingle();
+
+      if (existing) {
+        await supabaseAdmin
+          .from('subscriptions')
+          .update({
+            plan_type: plan_type || 'pro',
+            status: status || 'active',
+            current_period_end: periodEnd,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', existing.id);
+      } else {
+        await supabaseAdmin
+          .from('subscriptions')
+          .insert({
+            tenant_id: tenantId,
+            plan_type: plan_type || 'pro',
+            status: status || 'active',
+            current_period_end: periodEnd
+          });
+      }
+
+      if (status === 'active') {
+        await supabaseAdmin.from('tenants').update({ status: 'ACTIVE' }).eq('id', tenantId);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Tenant subscription updated successfully'
+      });
+    } catch (error) {
+      console.error('Admin subscription patch error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update tenant subscription'
       });
     }
   }

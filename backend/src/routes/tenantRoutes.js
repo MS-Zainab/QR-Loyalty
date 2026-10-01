@@ -2,6 +2,7 @@ const express = require('express');
 
 const { requireAuth } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
+const { isUuid } = require('../middleware/validation');
 const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
@@ -199,6 +200,13 @@ router.patch(
     try {
       const { id } = req.params;
       const { status } = req.body;
+
+      if (!isUuid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid vendor ID is required'
+        });
+      }
 
       const allowedStatuses = ['active', 'hold', 'removed'];
 
@@ -558,10 +566,26 @@ router.post(
         });
       }
 
+      // Create staff table operational record
+      const { data: staffRecord, error: staffRecordError } = await supabaseAdmin
+        .from('staff')
+        .insert({
+          tenant_id: tenantId,
+          profile_id: profile.id,
+          is_active: true
+        })
+        .select()
+        .single();
+
+      if (staffRecordError) {
+        console.error('Create staff table record error:', staffRecordError);
+      }
+
       return res.status(201).json({
         success: true,
         message: 'Vendor staff created successfully',
         staff: profile,
+        staff_record: staffRecord || null,
         tenant: {
           id: tenant.id,
           business_name: tenant.business_name,

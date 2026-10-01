@@ -3,6 +3,7 @@ const express = require('express');
 const supabaseAdmin = require('../config/supabaseAdmin');
 const { requireAuth } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
+const { isUuid } = require('../middleware/validation');
 
 const router = express.Router();
 
@@ -41,26 +42,26 @@ router.get(
         });
       }
 
-      // Get tenant information
-      const { data: tenant, error: tenantError } =
-        await supabaseAdmin
-          .from('tenants')
-         .select('id, business_name, status, created_at')
-          .eq('id', tenantId)
-          .single();
+      // The tenant and dashboard statistics use the authenticated tenant ID,
+      // so the reads are independent and can run concurrently.
+      const tenantQuery = supabaseAdmin
+        .from('tenants')
+        .select('id, business_name, status, created_at')
+        .eq('id', tenantId)
+        .single();
 
-      if (tenantError || !tenant) {
-        console.error('Owner dashboard tenant error:', tenantError);
-
-        return res.status(404).json({
-          success: false,
-          message: 'Vendor not found'
-        });
-      }
-
-      // Get active loyalty program
-      const { data: loyaltyProgram, error: loyaltyError } =
-        await supabaseAdmin
+      // These tenant-scoped reads are independent, so run them together.
+      const [
+        { data: tenant, error: tenantError },
+        { data: loyaltyProgram, error: loyaltyError },
+        { data: customers, error: customerError },
+        { data: stamps, error: stampError },
+        { data: rewards, error: rewardError },
+        { data: redemptions, error: redemptionError },
+        { data: staff, error: staffError }
+      ] = await Promise.all([
+        tenantQuery,
+        supabaseAdmin
           .from('loyalty_programs')
           .select(
             'id, name, stamps_required, reward_description, is_active'
@@ -71,7 +72,38 @@ router.get(
             ascending: false
           })
           .limit(1)
-          .maybeSingle();
+          .maybeSingle(),
+        supabaseAdmin
+          .from('customers')
+          .select('id')
+          .eq('tenant_id', tenantId)
+          .eq('status', 'active'),
+        supabaseAdmin
+          .from('stamps')
+          .select('id, staff_id, created_at')
+          .eq('tenant_id', tenantId),
+        supabaseAdmin
+          .from('rewards')
+          .select('id, name, is_active')
+          .eq('tenant_id', tenantId),
+        supabaseAdmin
+          .from('redemptions')
+          .select('id, staff_id, redeemed_at, created_at')
+          .eq('tenant_id', tenantId),
+        supabaseAdmin
+          .from('staff')
+          .select('id, profile_id, is_active')
+          .eq('tenant_id', tenantId)
+          .eq('is_active', true)
+      ]);
+      if (tenantError || !tenant) {
+        console.error('Owner dashboard tenant error:', tenantError);
+
+        return res.status(404).json({
+          success: false,
+          message: 'Vendor not found'
+        });
+      }
 
       if (loyaltyError) {
         console.error(
@@ -85,14 +117,6 @@ router.get(
         });
       }
 
-      // Get active customers
-      const { data: customers, error: customerError } =
-        await supabaseAdmin
-          .from('customers')
-          .select('id')
-          .eq('tenant_id', tenantId)
-          .eq('status', 'active');
-
       if (customerError) {
         console.error(
           'Owner dashboard customer error:',
@@ -104,13 +128,6 @@ router.get(
           message: 'Failed to retrieve customer statistics'
         });
       }
-
-      // Get all stamps
-      const { data: stamps, error: stampError } =
-        await supabaseAdmin
-          .from('stamps')
-          .select('id, staff_id, created_at')
-          .eq('tenant_id', tenantId);
 
       if (stampError) {
         console.error(
@@ -124,13 +141,6 @@ router.get(
         });
       }
 
-      // Get all rewards
-      const { data: rewards, error: rewardError } =
-        await supabaseAdmin
-          .from('rewards')
-          .select('id, name, is_active')
-          .eq('tenant_id', tenantId);
-
       if (rewardError) {
         console.error(
           'Owner dashboard reward error:',
@@ -143,13 +153,6 @@ router.get(
         });
       }
 
-      // Get all redemptions
-      const { data: redemptions, error: redemptionError } =
-        await supabaseAdmin
-          .from('redemptions')
-          .select('id, staff_id, redeemed_at, created_at')
-          .eq('tenant_id', tenantId);
-
       if (redemptionError) {
         console.error(
           'Owner dashboard redemption error:',
@@ -161,14 +164,6 @@ router.get(
           message: 'Failed to retrieve redemption statistics'
         });
       }
-
-      // Get active staff
-      const { data: staff, error: staffError } =
-        await supabaseAdmin
-          .from('staff')
-          .select('id, profile_id, is_active')
-          .eq('tenant_id', tenantId)
-          .eq('is_active', true);
 
       if (staffError) {
         console.error(
@@ -184,18 +179,20 @@ router.get(
 
       // Build staff activity
       const staffActivity = [];
+      const profileIds = (staff || []).map((member) => member.profile_id);
+      const { data: staffProfiles } = profileIds.length
+        ? await supabaseAdmin
+            .from('profiles')
+            .select('id, full_name')
+            .in('id', profileIds)
+        : { data: [] };
+      const profilesById = new Map(
+        (staffProfiles || []).map((profile) => [profile.id, profile])
+      );
 
       for (const staffMember of staff || []) {
-        const { data: profile, error: profileError } =
-          await supabaseAdmin
-            .from('profiles')
-            .select('full_name')
-            .eq('id', staffMember.profile_id)
-            .single();
-
-        if (profileError || !profile) {
-          continue;
-        }
+        const profile = profilesById.get(staffMember.profile_id);
+        if (!profile) continue;
 
         const staffStamps = (stamps || []).filter(
           (stamp) => stamp.staff_id === staffMember.id
@@ -345,78 +342,62 @@ router.get(
         });
       }
 
-      const staffList = [];
+      const profileIds = (staff || []).map((member) => member.profile_id);
+      const [
+        { data: profiles, error: profilesError },
+        { data: stamps, error: stampsError },
+        { data: redemptions, error: redemptionsError }
+      ] = profileIds.length
+        ? await Promise.all([
+            supabaseAdmin
+              .from('profiles')
+              .select('id, full_name, auth_user_id, role, status')
+              .in('id', profileIds),
+            supabaseAdmin
+              .from('stamps')
+              .select('id, staff_id, created_at')
+              .eq('tenant_id', tenantId),
+            supabaseAdmin
+              .from('redemptions')
+              .select('id, staff_id, redeemed_at, created_at')
+              .eq('tenant_id', tenantId)
+          ])
+        : [{ data: [], error: null }, { data: [], error: null }, { data: [], error: null }];
 
-      for (const staffMember of staff || []) {
-        const { data: profile, error: profileError } =
-          await supabaseAdmin
-            .from('profiles')
-            .select('id, full_name, auth_user_id, role, status')
-            .eq('id', staffMember.profile_id)
-            .single();
+      if (profilesError || stampsError || redemptionsError) {
+        console.error('Owner staff activity lookup error:', profilesError || stampsError || redemptionsError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to retrieve staff activity'
+        });
+      }
 
-        if (profileError || !profile) {
-          continue;
-        }
+      const profilesById = new Map((profiles || []).map((profile) => [profile.id, profile]));
+      const stampsByStaff = new Map();
+      const redemptionsByStaff = new Map();
+      for (const stamp of stamps || []) {
+        const entries = stampsByStaff.get(stamp.staff_id) || [];
+        entries.push(stamp);
+        stampsByStaff.set(stamp.staff_id, entries);
+      }
+      for (const redemption of redemptions || []) {
+        const entries = redemptionsByStaff.get(redemption.staff_id) || [];
+        entries.push(redemption);
+        redemptionsByStaff.set(redemption.staff_id, entries);
+      }
 
-        const { data: stamps, error: stampError } =
-          await supabaseAdmin
-            .from('stamps')
-            .select('id, created_at')
-            .eq('tenant_id', tenantId)
-            .eq('staff_id', staffMember.id);
-
-        if (stampError) {
-          console.error(
-            'Owner staff stamp lookup error:',
-            stampError
-          );
-
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve staff activity'
-          });
-        }
-
-        const { data: redemptions, error: redemptionError } =
-          await supabaseAdmin
-            .from('redemptions')
-            .select(
-              'id, redeemed_at, created_at'
-            )
-            .eq('tenant_id', tenantId)
-            .eq('staff_id', staffMember.id);
-
-        if (redemptionError) {
-          console.error(
-            'Owner staff redemption lookup error:',
-            redemptionError
-          );
-
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve staff activity'
-          });
-        }
-
+      const staffList = (staff || []).flatMap((staffMember) => {
+        const profile = profilesById.get(staffMember.profile_id);
+        if (!profile) return [];
+        const staffStamps = stampsByStaff.get(staffMember.id) || [];
+        const staffRedemptions = redemptionsByStaff.get(staffMember.id) || [];
         const activityDates = [
-          ...(stamps || []).map(
-            (stamp) => stamp.created_at
-          ),
-          ...(redemptions || []).map(
-            (redemption) =>
-              redemption.redeemed_at ||
-              redemption.created_at
-          )
+          ...staffStamps.map((stamp) => stamp.created_at),
+          ...staffRedemptions.map((redemption) => redemption.redeemed_at || redemption.created_at)
         ].filter(Boolean);
+        activityDates.sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
 
-        activityDates.sort(
-          (a, b) =>
-            new Date(b).getTime() -
-            new Date(a).getTime()
-        );
-
-        staffList.push({
+        return [{
           staff_id: staffMember.id,
           profile_id: staffMember.profile_id,
           staff_name: profile.full_name,
@@ -427,18 +408,14 @@ router.get(
           created_at: staffMember.created_at,
           updated_at: staffMember.updated_at,
           activity: {
-            stamps_issued: stamps
-              ? stamps.length
-              : 0,
-            rewards_redeemed: redemptions
-              ? redemptions.length
-              : 0,
+            stamps_issued: staffStamps.length,
+            rewards_redeemed: staffRedemptions.length,
             last_activity: activityDates.length
               ? activityDates[0]
               : null
           }
-        });
-      }
+        }];
+      });
 
       return res.status(200).json({
         success: true,
@@ -514,6 +491,13 @@ router.patch(
       const tenantId = req.profile.tenant_id;
       const staffId = req.params.id;
       const { status } = req.body;
+
+      if (!isUuid(staffId)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid staff ID is required'
+        });
+      }
 
       if (!tenantId) {
         return res.status(403).json({
@@ -625,4 +609,303 @@ router.patch(
   }
 );
 
+/**
+ * @swagger
+ * /api/owner/staff/{id}/password:
+ *   patch:
+ *     summary: Update staff member's password
+ *     description: Allows a vendor owner to update/reset credentials for a staff member belonging to their tenant.
+ *     tags:
+ *       - Owner Dashboard
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Staff ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - password
+ *             properties:
+ *               password:
+ *                 type: string
+ *                 format: password
+ *                 example: NewSecurePassword123!
+ *     responses:
+ *       200:
+ *         description: Staff password updated successfully
+ *       400:
+ *         description: Invalid request or weak password
+ *       403:
+ *         description: Only vendor owners can access this resource
+ *       404:
+ *         description: Staff member not found
+ *       500:
+ *         description: Failed to update staff password
+ */
+router.patch(
+  '/staff/:id/password',
+  requireAuth,
+  requireRole('vendor_owner'),
+  async (req, res) => {
+    try {
+      const tenantId = req.profile.tenant_id;
+      const staffId = req.params.id;
+      const { password } = req.body;
+
+      if (!isUuid(staffId)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid staff ID is required'
+        });
+      }
+
+      if (!tenantId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Vendor owner is not associated with a tenant'
+        });
+      }
+
+      if (!password || typeof password !== 'string' || password.length < 6) {
+        return res.status(400).json({
+          success: false,
+          message: 'Password must be at least 6 characters'
+        });
+      }
+
+      // Verify staff member belongs to owner's tenant
+      const { data: staff, error: staffError } = await supabaseAdmin
+        .from('staff')
+        .select('id, tenant_id, profile_id')
+        .eq('id', staffId)
+        .eq('tenant_id', tenantId)
+        .single();
+
+      if (staffError || !staff) {
+        return res.status(404).json({
+          success: false,
+          message: 'Staff member not found'
+        });
+      }
+
+      // Fetch profile to get auth_user_id
+      const { data: profile, error: profileError } = await supabaseAdmin
+        .from('profiles')
+        .select('id, auth_user_id')
+        .eq('id', staff.profile_id)
+        .single();
+
+      if (profileError || !profile || !profile.auth_user_id) {
+        return res.status(404).json({
+          success: false,
+          message: 'Staff profile auth account not found'
+        });
+      }
+
+      // Update Supabase Auth user password
+      const { error: updateAuthError } = await supabaseAdmin.auth.admin.updateUserById(
+        profile.auth_user_id,
+        { password }
+      );
+
+      if (updateAuthError) {
+        console.error('Staff password update error:', updateAuthError);
+        return res.status(400).json({
+          success: false,
+          message: updateAuthError.message || 'Failed to update staff password'
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Staff password updated successfully'
+      });
+    } catch (error) {
+      console.error('Staff password update catch error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update staff password'
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/owner/subscription:
+ *   get:
+ *     summary: Get tenant subscription details
+ */
+router.get(
+  '/subscription',
+  requireAuth,
+  requireRole('vendor_owner'),
+  async (req, res) => {
+    try {
+      const tenantId = req.profile.tenant_id;
+      if (!tenantId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Vendor owner is not associated with a tenant'
+        });
+      }
+
+      const { data: subscription } = await supabaseAdmin
+        .from('subscriptions')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .maybeSingle();
+
+      const { data: tenant } = await supabaseAdmin
+        .from('tenants')
+        .select('created_at, status')
+        .eq('id', tenantId)
+        .single();
+
+      const createdAt = new Date(tenant?.created_at || Date.now());
+      const trialEnds = new Date(createdAt.getTime() + 14 * 24 * 60 * 60 * 1000);
+      const daysLeft = Math.max(0, Math.ceil((trialEnds - new Date()) / (1000 * 60 * 60 * 24)));
+
+      if (!subscription) {
+        return res.status(200).json({
+          success: true,
+          subscription: {
+            plan_type: 'trial',
+            status: daysLeft > 0 ? 'active' : 'expired',
+            billing_cycle: 'monthly',
+            amount_paid: 0,
+            days_left: daysLeft,
+            trial_ends_at: trialEnds.toISOString(),
+            current_period_end: trialEnds.toISOString()
+          }
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        subscription: {
+          ...subscription,
+          days_left: subscription.current_period_end
+            ? Math.max(0, Math.ceil((new Date(subscription.current_period_end) - new Date()) / (1000 * 60 * 60 * 24)))
+            : daysLeft
+        }
+      });
+    } catch (error) {
+      console.error('Fetch owner subscription error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch subscription details'
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/owner/subscription/upgrade:
+ *   post:
+ *     summary: Upgrade tenant subscription
+ */
+router.post(
+  '/subscription/upgrade',
+  requireAuth,
+  requireRole('vendor_owner'),
+  async (req, res) => {
+    try {
+      const tenantId = req.profile.tenant_id;
+      const { plan_type = 'pro', billing_cycle = 'monthly' } = req.body || {};
+
+      if (!tenantId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Vendor owner is not associated with a tenant'
+        });
+      }
+
+      const validPlans = ['basic', 'pro', 'enterprise'];
+      if (!validPlans.includes(plan_type)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid plan type selected'
+        });
+      }
+
+      const days = billing_cycle === 'yearly' ? 365 : 30;
+      const periodEnd = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+      const amount = plan_type === 'basic' ? (billing_cycle === 'yearly' ? 190 : 19)
+        : plan_type === 'pro' ? (billing_cycle === 'yearly' ? 490 : 49)
+        : (billing_cycle === 'yearly' ? 990 : 99);
+
+      const { data: existing } = await supabaseAdmin
+        .from('subscriptions')
+        .select('id')
+        .eq('tenant_id', tenantId)
+        .maybeSingle();
+
+      let subData;
+      if (existing) {
+        const { data: updated } = await supabaseAdmin
+          .from('subscriptions')
+          .update({
+            plan_type,
+            status: 'active',
+            billing_cycle,
+            amount_paid: amount,
+            current_period_end: periodEnd,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', existing.id)
+          .select()
+          .single();
+        subData = updated;
+      } else {
+        const { data: created } = await supabaseAdmin
+          .from('subscriptions')
+          .insert({
+            tenant_id: tenantId,
+            plan_type,
+            status: 'active',
+            billing_cycle,
+            amount_paid: amount,
+            current_period_end: periodEnd
+          })
+          .select()
+          .single();
+        subData = created;
+      }
+
+      await supabaseAdmin.from('tenants').update({ status: 'ACTIVE' }).eq('id', tenantId);
+
+      return res.status(200).json({
+        success: true,
+        message: `Successfully subscribed to ${plan_type.toUpperCase()} plan!`,
+        subscription: subData || {
+          plan_type,
+          status: 'active',
+          billing_cycle,
+          amount_paid: amount,
+          current_period_end: periodEnd
+        }
+      });
+    } catch (error) {
+      console.error('Upgrade subscription error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Subscription upgrade failed'
+      });
+    }
+  }
+);
+
 module.exports = router;
+

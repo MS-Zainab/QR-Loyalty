@@ -43,13 +43,39 @@ router.get(
         });
       }
 
-      const { data: staff, error: staffError } =
+      let { data: staff, error: staffError } =
         await supabaseAdmin
           .from('staff')
           .select('id, tenant_id, profile_id, is_active')
           .eq('tenant_id', tenantId)
           .eq('profile_id', profileId)
-          .single();
+          .maybeSingle();
+
+      if (!staff) {
+        // Auto-repair missing staff record if profile exists with role vendor_staff
+        const { data: profileCheck } = await supabaseAdmin
+          .from('profiles')
+          .select('id, tenant_id, role')
+          .eq('id', profileId)
+          .maybeSingle();
+
+        if (profileCheck && (profileCheck.role === 'vendor_staff' || profileCheck.role === 'vendor_owner')) {
+          const { data: repairedStaff } = await supabaseAdmin
+            .from('staff')
+            .insert({
+              tenant_id: tenantId,
+              profile_id: profileId,
+              is_active: true
+            })
+            .select('id, tenant_id, profile_id, is_active')
+            .single();
+
+          if (repairedStaff) {
+            staff = repairedStaff;
+            staffError = null;
+          }
+        }
+      }
 
       if (staffError || !staff) {
         return res.status(404).json({
@@ -219,8 +245,8 @@ router.get(
         });
       }
 
-      // Find the operational staff record
-      const { data: staff, error: staffError } =
+      // Find the operational staff record (with auto-repair fallback)
+      let { data: staff, error: staffError } =
         await supabaseAdmin
           .from('staff')
           .select(
@@ -228,7 +254,32 @@ router.get(
           )
           .eq('tenant_id', tenantId)
           .eq('profile_id', profileId)
-          .single();
+          .maybeSingle();
+
+      if (!staff) {
+        const { data: profileCheck } = await supabaseAdmin
+          .from('profiles')
+          .select('id, tenant_id, role')
+          .eq('id', profileId)
+          .maybeSingle();
+
+        if (profileCheck && (profileCheck.role === 'vendor_staff' || profileCheck.role === 'vendor_owner')) {
+          const { data: repairedStaff } = await supabaseAdmin
+            .from('staff')
+            .insert({
+              tenant_id: tenantId,
+              profile_id: profileId,
+              is_active: true
+            })
+            .select('id, tenant_id, profile_id, is_active')
+            .single();
+
+          if (repairedStaff) {
+            staff = repairedStaff;
+            staffError = null;
+          }
+        }
+      }
 
       if (staffError || !staff) {
         return res.status(404).json({

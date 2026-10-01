@@ -2,6 +2,7 @@ const express = require('express');
 
 const { requireAuth } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
+const { isUuid } = require('../middleware/validation');
 const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
@@ -60,6 +61,7 @@ router.get(
 
       return res.status(200).json({
         success: true,
+        loyalty: program,
         program
       });
     } catch (error) {
@@ -210,6 +212,7 @@ router.post(
         message: existingProgram
           ? 'Loyalty program updated successfully'
           : 'Loyalty program created successfully',
+        loyalty: program,
         program
       });
     } catch (error) {
@@ -294,6 +297,13 @@ router.patch(
         reward_description,
         is_active
       } = req.body;
+
+      if (!isUuid(loyaltyProgramId)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid loyalty program ID is required'
+        });
+      }
 
       // Make sure at least one field is provided
       if (
@@ -417,6 +427,8 @@ router.patch(
       return res.status(200).json({
         success: true,
         message: 'Loyalty program updated successfully',
+        loyalty: updatedProgram,
+        program: updatedProgram,
         loyalty_program: updatedProgram
       });
     } catch (error) {

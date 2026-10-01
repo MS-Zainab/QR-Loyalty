@@ -150,34 +150,40 @@ router.post(
 async function calculateCustomerProgress(
   tenantId,
   customerId,
-  loyaltyProgram
+  loyaltyProgram,
+  preloaded = {}
 ) {
-  const { count: totalStampCount, error: stampError } =
-    await supabaseAdmin
-      .from('stamps')
-      .select('id', {
-        count: 'exact',
-        head: true
-      })
-      .eq('tenant_id', tenantId)
-      .eq('customer_id', customerId);
+  const stampCountQuery = preloaded.totalStamps !== undefined
+    ? Promise.resolve({ count: preloaded.totalStamps, error: null })
+    : supabaseAdmin
+        .from('stamps')
+        .select('id', {
+          count: 'exact',
+          head: true
+        })
+        .eq('tenant_id', tenantId)
+        .eq('customer_id', customerId);
+  const redemptionQuery = preloaded.redemptionRows !== undefined
+    ? Promise.resolve({ data: preloaded.redemptionRows, error: null })
+    : supabaseAdmin
+        .from('redemptions')
+        .select('id, reward_id')
+        .eq('tenant_id', tenantId)
+        .eq('customer_id', customerId);
 
+  const [
+    { count: totalStampCount, error: stampError },
+    { data: redemptionRows, error: redemptionError }
+  ] = await Promise.all([stampCountQuery, redemptionQuery]);
   if (stampError) {
     throw stampError;
   }
 
-  const totalStamps = totalStampCount || 0;
-
-  const { data: redemptionRows, error: redemptionError } =
-    await supabaseAdmin
-      .from('redemptions')
-      .select('id, reward_id')
-      .eq('tenant_id', tenantId)
-      .eq('customer_id', customerId);
-
   if (redemptionError) {
     throw redemptionError;
   }
+
+  const totalStamps = totalStampCount || 0;
 
   let consumedStamps = 0;
 
@@ -239,15 +245,10 @@ async function calculateCustomerProgress(
       ? Math.floor(currentProgress / stampsRequired)
       : 0;
 
-  const currentCycleProgress =
-    stampsRequired > 0
-      ? currentProgress % stampsRequired
-      : currentProgress;
-
   const remainingStamps =
     stampsRequired > 0
       ? Math.max(
-          stampsRequired - currentCycleProgress,
+          stampsRequired - currentProgress,
           0
         )
       : 0;
@@ -255,7 +256,7 @@ async function calculateCustomerProgress(
   return {
     total_stamps: totalStamps,
     consumed_stamps: consumedStamps,
-    current_progress: currentCycleProgress,
+    current_progress: currentProgress,
     stamps_required: stampsRequired,
     remaining_stamps: remainingStamps,
     completed_cycles: completedCycles
@@ -473,8 +474,12 @@ router.get(
       const stampHistory = [];
 
       for (const customer of customers) {
-        const { data: stamps, error: stampError } =
-          await supabaseAdmin
+        const [
+          { data: stamps, error: stampError },
+          { data: loyaltyProgram, error: loyaltyError },
+          { data: redemptionRows, error: redemptionError }
+        ] = await Promise.all([
+          supabaseAdmin
             .from('stamps')
             .select(
               'id, tenant_id, customer_id, staff_id, visit_id, created_at'
@@ -483,7 +488,21 @@ router.get(
             .eq('customer_id', customer.id)
             .order('created_at', {
               ascending: false
-            });
+            }),
+          supabaseAdmin
+            .from('loyalty_programs')
+            .select(
+              'id, stamps_required, is_active'
+            )
+            .eq('tenant_id', customer.tenant_id)
+            .eq('is_active', true)
+            .maybeSingle(),
+          supabaseAdmin
+            .from('redemptions')
+            .select('id, reward_id')
+            .eq('tenant_id', customer.tenant_id)
+            .eq('customer_id', customer.id)
+        ]);
 
         if (stampError) {
           console.error(
@@ -497,16 +516,6 @@ router.get(
           });
         }
 
-        const { data: loyaltyProgram, error: loyaltyError } =
-          await supabaseAdmin
-            .from('loyalty_programs')
-            .select(
-              'id, stamps_required, is_active'
-            )
-            .eq('tenant_id', customer.tenant_id)
-            .eq('is_active', true)
-            .maybeSingle();
-
         if (loyaltyError) {
           console.error(
             'Customer stamp history loyalty lookup error:',
@@ -519,10 +528,26 @@ router.get(
           });
         }
 
+        if (redemptionError) {
+          console.error(
+            'Customer stamp history redemption lookup error:',
+            redemptionError
+          );
+
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve redemption history'
+          });
+        }
+
         const progress = await calculateCustomerProgress(
           customer.tenant_id,
           customer.id,
-          loyaltyProgram
+          loyaltyProgram,
+          {
+            totalStamps: stamps?.length || 0,
+            redemptionRows: redemptionRows || []
+          }
         );
 
         stampHistory.push({

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
+import { logClientError } from '../../services/logging';
 
 const AdminDashboard = () => {
   const { session, profile, logout } = useAuth();
@@ -12,11 +13,33 @@ const AdminDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeSection, setActiveSection] = useState('overview');
+  const loadedForUser = useRef(null);
+  const [loadedForUserId, setLoadedForUserId] = useState(null);
 
-  const getConfig = () => ({
+  // Tenant Onboarding state
+  const [showAddTenantModal, setShowAddTenantModal] = useState(false);
+  const [businessName, setBusinessName] = useState('');
+  const [ownerFullName, setOwnerFullName] = useState('');
+  const [ownerEmail, setOwnerEmail] = useState('');
+  const [ownerPassword, setOwnerPassword] = useState('');
+  const [onboardLoading, setOnboardLoading] = useState(false);
+  const [onboardSuccess, setOnboardSuccess] = useState('');
+
+  // Admin Monthly Tenant Report State
+  const [selectedReportTenantId, setSelectedReportTenantId] = useState('');
+  const [selectedReportMonth, setSelectedReportMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  const [monthlyReportData, setMonthlyReportData] = useState(null);
+  const [reportLoading, setReportLoading] = useState(false);
+
+  // Subscriptions state
+  const [subscriptions, setSubscriptions] = useState([]);
+  const [subSummary, setSubSummary] = useState(null);
+
+  const getConfig = (signal) => ({
     headers: {
       Authorization: `Bearer ${session?.access_token}`
-    }
+    },
+    ...(signal ? { signal } : {})
   });
 
   const getValue = (object, keys, fallback = 0) => {
@@ -50,24 +73,33 @@ const AdminDashboard = () => {
     return date.toLocaleString();
   };
 
-  const loadDashboard = async () => {
+  const loadDashboard = async (signal) => {
     try {
       setLoading(true);
       setError('');
 
-      const config = getConfig();
+      const config = getConfig(signal);
 
       const [
         dashboardResponse,
         vendorsResponse,
-        reportsResponse
+        reportsResponse,
+        subResponse
       ] = await Promise.all([
         api.get('/admin/dashboard', config),
         api.get('/admin/vendors', config),
-        api.get('/admin/reports', config)
+        api.get('/admin/reports', config),
+        api.get('/admin/subscriptions', config).catch(() => ({ data: { subscriptions: [], summary: null } }))
       ]);
 
-      setDashboard(dashboardResponse.data);
+      if (signal?.aborted) return;
+
+      setSubscriptions(subResponse.data?.subscriptions || []);
+      setSubSummary(subResponse.data?.summary || null);
+
+      const dashboardData =
+        dashboardResponse.data?.dashboard ?? dashboardResponse.data;
+      setDashboard(dashboardData);
 
       /*
        * Admin vendors response can be either:
@@ -83,7 +115,7 @@ const AdminDashboard = () => {
        * Normalize it to an array.
        */
       const vendorData =
-        dashboardResponse.data?.vendors ||
+        dashboardData?.vendors ||
         vendorsResponse.data?.vendors ||
         vendorsResponse.data ||
         [];
@@ -98,6 +130,7 @@ const AdminDashboard = () => {
        * Normalize reports response to an array.
        */
       const reportData =
+        reportsResponse.data?.report?.vendors ||
         reportsResponse.data?.reports ||
         reportsResponse.data ||
         [];
@@ -108,10 +141,8 @@ const AdminDashboard = () => {
           : []
       );
     } catch (err) {
-      console.error(
-        'Failed to load admin dashboard:',
-        err
-      );
+      if (signal?.aborted) return;
+      logClientError('Failed to load admin dashboard', err);
 
       setError(
         err?.response?.data?.message ||
@@ -119,15 +150,30 @@ const AdminDashboard = () => {
         'Failed to load admin dashboard.'
       );
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   };
 
+  const loadDashboardEffect = useEffectEvent(loadDashboard);
+
   useEffect(() => {
-    if (session?.access_token) {
-      loadDashboard();
-    }
-  }, [session]);
+    const userId = session?.user?.id;
+    if (!userId || loadedForUser.current === userId) return;
+    loadedForUser.current = userId;
+    setDashboard(null);
+    setVendors([]);
+    setReports([]);
+    setLoadedForUserId(userId);
+    const controller = new AbortController();
+    loadDashboardEffect(controller.signal);
+
+    return () => {
+      controller.abort();
+      if (loadedForUser.current === userId) {
+        loadedForUser.current = null;
+      }
+    };
+  }, [session?.user?.id]);
 
   const updateVendorStatus = async (
     vendorId,
@@ -144,10 +190,7 @@ const AdminDashboard = () => {
 
       await loadDashboard();
     } catch (err) {
-      console.error(
-        'Failed to update vendor status:',
-        err
-      );
+      logClientError('Failed to update vendor status', err);
 
       setError(
         err?.response?.data?.message ||
@@ -155,6 +198,127 @@ const AdminDashboard = () => {
         'Failed to update vendor status.'
       );
     }
+  };
+
+  const handleAddTenant = async (event) => {
+    event.preventDefault();
+    setError('');
+    setOnboardSuccess('');
+
+    if (!businessName.trim() || !ownerEmail.trim() || !ownerPassword || !ownerFullName.trim()) {
+      setError('Business name, owner full name, email, and password are required.');
+      return;
+    }
+
+    if (ownerPassword.length < 6) {
+      setError('Owner password must be at least 6 characters.');
+      return;
+    }
+
+    try {
+      setOnboardLoading(true);
+      const config = getConfig();
+
+      // Step 1: Create Tenant
+      const tenantRes = await api.post('/tenants', { business_name: businessName.trim() }, config);
+      const createdTenant = tenantRes.data?.tenant;
+
+      if (!createdTenant?.id) {
+        throw new Error('Failed to create tenant record.');
+      }
+
+      // Step 2: Create Vendor Owner
+      await api.post(`/tenants/${createdTenant.id}/owner`, {
+        email: ownerEmail.trim(),
+        password: ownerPassword,
+        full_name: ownerFullName.trim()
+      }, config);
+
+      setOnboardSuccess(`Tenant "${businessName}" & owner "${ownerFullName}" onboarded successfully!`);
+      setBusinessName('');
+      setOwnerFullName('');
+      setOwnerEmail('');
+      setOwnerPassword('');
+      setShowAddTenantModal(false);
+
+      await loadDashboard();
+    } catch (err) {
+      logClientError('Tenant onboarding failed', err);
+      setError(
+        err?.response?.data?.message ||
+        err?.response?.data?.error ||
+        'Failed to onboard new tenant.'
+      );
+    } finally {
+      setOnboardLoading(false);
+    }
+  };
+
+  const handleGenerateMonthlyReport = async (e) => {
+    if (e) e.preventDefault();
+    if (!selectedReportTenantId) {
+      setError('Please select a tenant to generate the monthly report.');
+      return;
+    }
+    if (!selectedReportMonth) {
+      setError('Please select a month for the report.');
+      return;
+    }
+    try {
+      setReportLoading(true);
+      setError('');
+      const res = await api.get(`/admin/reports/monthly?tenant_id=${selectedReportTenantId}&month=${selectedReportMonth}`, getConfig());
+      setMonthlyReportData(res.data?.report || null);
+    } catch (err) {
+      logClientError('Failed to generate monthly report', err);
+      setError(
+        err?.response?.data?.message ||
+        err?.response?.data?.error ||
+        'Failed to generate monthly report.'
+      );
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  const downloadMonthlyReportCsv = () => {
+    if (!monthlyReportData) return;
+    const { business_name, report_month, summary, daily_breakdown, customer_frequency } = monthlyReportData;
+
+    let csvContent = `Tenant Monthly Report: ${business_name}\n`;
+    csvContent += `Report Month: ${report_month}\n\n`;
+    csvContent += `SUMMARY METRICS\n`;
+    csvContent += `Metric,Value\n`;
+    csvContent += `Total Visits,${summary.total_visits}\n`;
+    csvContent += `Unique Customers,${summary.unique_customers}\n`;
+    csvContent += `Repeat Visits,${summary.repeat_visits}\n`;
+    csvContent += `New Customers,${summary.new_customers}\n`;
+    csvContent += `Average Visits / Customer,${summary.avg_visits_per_customer}\n`;
+    csvContent += `Stamps Issued,${summary.stamps_issued}\n`;
+    csvContent += `Rewards Redeemed,${summary.rewards_redeemed}\n`;
+    csvContent += `Peak Visit Day,${summary.peak_visit_day?.date} (${summary.peak_visit_day?.visits} visits)\n`;
+    csvContent += `Lowest Visit Day,${summary.lowest_visit_day?.date} (${summary.lowest_visit_day?.visits} visits)\n\n`;
+
+    csvContent += `DAILY BREAKDOWN\n`;
+    csvContent += `Date,Visits,Unique Customers,Stamps,Redemptions\n`;
+    (daily_breakdown || []).forEach((row) => {
+      csvContent += `${row.date},${row.visits},${row.unique_customers},${row.stamps},${row.redemptions}\n`;
+    });
+
+    csvContent += `\nCUSTOMER VISIT FREQUENCY\n`;
+    csvContent += `Customer Identifier,Visits\n`;
+    (customer_frequency || []).forEach((row) => {
+      csvContent += `"${row.customer_identifier.replace(/"/g, '""')}",${row.visits}\n`;
+    });
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `${business_name.replace(/\s+/g, '_')}_Monthly_Report_${report_month}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const downloadReports = async () => {
@@ -194,10 +358,7 @@ const AdminDashboard = () => {
 
       window.URL.revokeObjectURL(url);
     } catch (err) {
-      console.error(
-        'Failed to export reports:',
-        err
-      );
+      logClientError('Failed to export reports', err);
 
       setError(
         err?.response?.data?.message ||
@@ -211,14 +372,11 @@ const AdminDashboard = () => {
     try {
       await logout();
     } catch (err) {
-      console.error(
-        'Logout failed:',
-        err
-      );
+      logClientError('Logout failed', err);
     }
   };
 
-  if (loading) {
+  if (loading || loadedForUserId !== session?.user?.id) {
     return (
       <div
         style={{
@@ -233,6 +391,7 @@ const AdminDashboard = () => {
   }
 
   const overview =
+    dashboard?.statistics ||
     dashboard?.overview ||
     dashboard?.stats ||
     dashboard ||
@@ -308,7 +467,11 @@ const AdminDashboard = () => {
   const vendorStatusSummary =
     dashboard?.vendor_status_summary ||
     dashboard?.vendorStatusSummary ||
-    [];
+    [
+      { status: 'active', count: activeVendors },
+      { status: 'hold', count: holdVendors },
+      { status: 'removed', count: removedVendors }
+    ];
 
   return (
     <div
@@ -384,7 +547,8 @@ const AdminDashboard = () => {
         {[
           ['overview', 'Overview'],
           ['vendors', 'Vendors'],
-          ['reports', 'Reports']
+          ['reports', 'Reports'],
+          ['subscriptions', 'Subscriptions & Billing']
         ].map(([key, label]) => (
           <button
             key={key}
@@ -661,21 +825,57 @@ const AdminDashboard = () => {
             >
               <h2>Vendors</h2>
 
-              <button
-                onClick={loadDashboard}
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button
+                  onClick={() => {
+                    setError('');
+                    setOnboardSuccess('');
+                    setShowAddTenantModal(true);
+                  }}
+                  style={{
+                    padding: '10px 16px',
+                    border: 'none',
+                    borderRadius: '8px',
+                    backgroundColor: '#16a34a',
+                    color: '#ffffff',
+                    cursor: 'pointer',
+                    fontWeight: '600'
+                  }}
+                >
+                  + Add New Tenant
+                </button>
+
+                <button
+                  onClick={loadDashboard}
+                  style={{
+                    padding: '10px 16px',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '8px',
+                    backgroundColor: '#ffffff',
+                    color: '#374151',
+                    cursor: 'pointer',
+                    fontWeight: '500'
+                  }}
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+
+            {onboardSuccess && (
+              <div
                 style={{
-                  padding: '10px 16px',
-                  border: 'none',
+                  marginTop: '16px',
+                  padding: '14px 16px',
                   borderRadius: '8px',
-                  backgroundColor:
-                    '#2563eb',
-                  color: '#ffffff',
-                  cursor: 'pointer'
+                  backgroundColor: '#dcfce7',
+                  color: '#166534',
+                  border: '1px solid #bbf7d0'
                 }}
               >
-                Refresh
-              </button>
-            </div>
+                {onboardSuccess}
+              </div>
+            )}
 
             <div
               style={{
@@ -976,6 +1176,109 @@ const AdminDashboard = () => {
                 </div>
               )}
             </div>
+            {/* Tenant Onboarding Modal */}
+            {showAddTenantModal && (
+              <div
+                style={{
+                  position: 'fixed',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  backgroundColor: 'rgba(0,0,0,0.5)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '20px',
+                  zIndex: 1000
+                }}
+              >
+                <div
+                  style={{
+                    backgroundColor: '#ffffff',
+                    borderRadius: '16px',
+                    padding: '28px',
+                    maxWidth: '480px',
+                    width: '100%',
+                    boxSizing: 'border-box'
+                  }}
+                >
+                  <h3 style={{ margin: '0 0 6px', fontSize: '20px', fontWeight: '700', color: '#111827' }}>
+                    Onboard New Vendor Tenant
+                  </h3>
+                  <p style={{ margin: '0 0 20px', fontSize: '14px', color: '#6b7280', lineHeight: 1.5 }}>
+                    Create a new business tenant and configure its vendor owner credentials.
+                  </p>
+
+                  <form onSubmit={handleAddTenant} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Business Name</label>
+                      <input
+                        type="text"
+                        value={businessName}
+                        onChange={(e) => setBusinessName(e.target.value)}
+                        placeholder="e.g. Express Coffee Bar"
+                        required
+                        style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                      />
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Owner Full Name</label>
+                      <input
+                        type="text"
+                        value={ownerFullName}
+                        onChange={(e) => setOwnerFullName(e.target.value)}
+                        placeholder="e.g. Alex Rivera"
+                        required
+                        style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                      />
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Owner Email Address</label>
+                      <input
+                        type="email"
+                        value={ownerEmail}
+                        onChange={(e) => setOwnerEmail(e.target.value)}
+                        placeholder="owner@expresscoffee.com"
+                        required
+                        style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                      />
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Initial Owner Password</label>
+                      <input
+                        type="password"
+                        value={ownerPassword}
+                        onChange={(e) => setOwnerPassword(e.target.value)}
+                        placeholder="At least 6 characters"
+                        required
+                        style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                      />
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
+                      <button
+                        type="button"
+                        onClick={() => setShowAddTenantModal(false)}
+                        style={{ padding: '10px 16px', border: '1px solid #d1d5db', backgroundColor: '#ffffff', color: '#374151', borderRadius: '8px', cursor: 'pointer', fontWeight: '500' }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={onboardLoading}
+                        style={{ padding: '10px 16px', border: 'none', backgroundColor: '#16a34a', color: '#ffffff', borderRadius: '8px', cursor: 'pointer', fontWeight: '600' }}
+                      >
+                        {onboardLoading ? 'Creating...' : 'Onboard Tenant'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
           </section>
         )}
 
@@ -985,42 +1288,236 @@ const AdminDashboard = () => {
             <div
               style={{
                 display: 'flex',
-                justifyContent:
-                  'space-between',
+                justifyContent: 'space-between',
                 alignItems: 'center',
                 gap: '15px',
                 flexWrap: 'wrap'
               }}
             >
-              <h2>Reports</h2>
+              <div>
+                <h2 style={{ margin: 0 }}>Reports</h2>
+                <p style={{ margin: '4px 0 0', color: '#6b7280', fontSize: '14px' }}>
+                  Platform Admin Official Monthly Tenant Report Generator
+                </p>
+              </div>
 
               <button
                 onClick={downloadReports}
                 style={{
                   padding: '10px 16px',
-                  border: 'none',
+                  border: '1px solid #2563eb',
                   borderRadius: '8px',
-                  backgroundColor:
-                    '#2563eb',
-                  color: '#ffffff',
+                  backgroundColor: '#ffffff',
+                  color: '#2563eb',
                   cursor: 'pointer',
                   fontWeight: '600'
                 }}
               >
-                Download Reports
+                Export Platform CSV
               </button>
             </div>
 
+            {/* Monthly Tenant Report Generator Form */}
             <div
               style={{
                 marginTop: '20px',
-                backgroundColor:
-                  '#ffffff',
+                backgroundColor: '#ffffff',
+                padding: '24px',
                 borderRadius: '12px',
                 border: '1px solid #e5e7eb',
-                overflowX: 'auto'
+                boxShadow: '0 2px 4px rgba(0,0,0,0.02)'
               }}
             >
+              <h3 style={{ margin: '0 0 16px', fontSize: '18px', fontWeight: '700', color: '#111827' }}>
+                Generate Tenant Monthly Report
+              </h3>
+
+              <form onSubmit={handleGenerateMonthlyReport} style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: '220px', flex: 1 }}>
+                  <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Select Tenant</label>
+                  <select
+                    value={selectedReportTenantId}
+                    onChange={(e) => setSelectedReportTenantId(e.target.value)}
+                    required
+                    style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                  >
+                    <option value="">-- Choose Vendor Tenant --</option>
+                    {vendors.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.business_name || v.name} ({v.status})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: '180px' }}>
+                  <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Select Month</label>
+                  <input
+                    type="month"
+                    value={selectedReportMonth}
+                    onChange={(e) => setSelectedReportMonth(e.target.value)}
+                    required
+                    style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={reportLoading || !selectedReportTenantId}
+                  style={{
+                    padding: '11px 22px',
+                    border: 'none',
+                    borderRadius: '8px',
+                    backgroundColor: reportLoading || !selectedReportTenantId ? '#9ca3af' : '#2563eb',
+                    color: '#ffffff',
+                    cursor: reportLoading || !selectedReportTenantId ? 'not-allowed' : 'pointer',
+                    fontWeight: '600',
+                    fontSize: '14px',
+                    height: '42px'
+                  }}
+                >
+                  {reportLoading ? 'Generating...' : 'Generate Report'}
+                </button>
+              </form>
+            </div>
+
+            {/* Generated Monthly Report Preview */}
+            {monthlyReportData && (
+              <div
+                style={{
+                  marginTop: '24px',
+                  backgroundColor: '#ffffff',
+                  padding: '24px',
+                  borderRadius: '12px',
+                  border: '1px solid #2563eb'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '15px', marginBottom: '20px' }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: '20px', color: '#1e3a8a' }}>
+                      {monthlyReportData.business_name} — Monthly Report ({monthlyReportData.report_month})
+                    </h3>
+                    <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#6b7280' }}>
+                      Official Tenant Analytics & Activity Summary
+                    </p>
+                  </div>
+
+                  <button
+                    onClick={downloadMonthlyReportCsv}
+                    style={{
+                      padding: '10px 18px',
+                      border: 'none',
+                      borderRadius: '8px',
+                      backgroundColor: '#16a34a',
+                      color: '#ffffff',
+                      cursor: 'pointer',
+                      fontWeight: '600',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px'
+                    }}
+                  >
+                    <span>↓</span> Download CSV
+                  </button>
+                </div>
+
+                {/* Report Key Metrics Grid */}
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+                    gap: '16px',
+                    marginBottom: '28px'
+                  }}
+                >
+                  {[
+                    ['Total Visits', monthlyReportData.summary?.total_visits ?? 0],
+                    ['Unique Customers', monthlyReportData.summary?.unique_customers ?? 0],
+                    ['Repeat Visits', monthlyReportData.summary?.repeat_visits ?? 0],
+                    ['New Customers', monthlyReportData.summary?.new_customers ?? 0],
+                    ['Avg Visits / Cust', monthlyReportData.summary?.avg_visits_per_customer ?? 0],
+                    ['Stamps Issued', monthlyReportData.summary?.stamps_issued ?? 0],
+                    ['Rewards Redeemed', monthlyReportData.summary?.rewards_redeemed ?? 0],
+                    ['Peak Visit Day', `${monthlyReportData.summary?.peak_visit_day?.date} (${monthlyReportData.summary?.peak_visit_day?.visits || 0})`],
+                    ['Lowest Visit Day', `${monthlyReportData.summary?.lowest_visit_day?.date} (${monthlyReportData.summary?.lowest_visit_day?.visits || 0})`]
+                  ].map(([label, val]) => (
+                    <div key={label} style={{ backgroundColor: '#f8fafc', padding: '16px', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ fontSize: '12px', color: '#64748b', textTransform: 'uppercase', fontWeight: '600' }}>{label}</span>
+                      <h4 style={{ margin: '8px 0 0', fontSize: '20px', color: '#0f172a' }}>{String(val)}</h4>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Daily Breakdown Table */}
+                <h4 style={{ margin: '0 0 12px', fontSize: '16px', fontWeight: '700' }}>Daily Visit Breakdown</h4>
+                <div style={{ overflowX: 'auto', marginBottom: '28px' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '600px' }}>
+                    <thead>
+                      <tr style={{ backgroundColor: '#f1f5f9' }}>
+                        <th style={{ padding: '10px 12px', textAlign: 'left', borderBottom: '2px solid #cbd5e1' }}>Date</th>
+                        <th style={{ padding: '10px 12px', textAlign: 'center', borderBottom: '2px solid #cbd5e1' }}>Visits</th>
+                        <th style={{ padding: '10px 12px', textAlign: 'center', borderBottom: '2px solid #cbd5e1' }}>Unique Customers</th>
+                        <th style={{ padding: '10px 12px', textAlign: 'center', borderBottom: '2px solid #cbd5e1' }}>Stamps</th>
+                        <th style={{ padding: '10px 12px', textAlign: 'center', borderBottom: '2px solid #cbd5e1' }}>Redemptions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(monthlyReportData.daily_breakdown || []).map((row) => (
+                        <tr key={row.date} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                          <td style={{ padding: '10px 12px', fontWeight: '500' }}>{row.date}</td>
+                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>{row.visits}</td>
+                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>{row.unique_customers}</td>
+                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>{row.stamps}</td>
+                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>{row.redemptions}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Customer Visit Frequency */}
+                <h4 style={{ margin: '0 0 12px', fontSize: '16px', fontWeight: '700' }}>Customer Visit Frequency</h4>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '450px' }}>
+                    <thead>
+                      <tr style={{ backgroundColor: '#f1f5f9' }}>
+                        <th style={{ padding: '10px 12px', textAlign: 'left', borderBottom: '2px solid #cbd5e1' }}>Customer Identifier</th>
+                        <th style={{ padding: '10px 12px', textAlign: 'right', borderBottom: '2px solid #cbd5e1' }}>Visits in Period</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(monthlyReportData.customer_frequency || []).length > 0 ? (
+                        monthlyReportData.customer_frequency.map((item, idx) => (
+                          <tr key={idx} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                            <td style={{ padding: '10px 12px', fontWeight: '500' }}>{item.customer_identifier}</td>
+                            <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '700', color: '#2563eb' }}>{item.visits} visits</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={2} style={{ padding: '14px', color: '#6b7280', textAlign: 'center' }}>
+                            No customer visit activity recorded in this month.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Platform Overview Reports */}
+            <div
+              style={{
+                marginTop: '30px',
+                backgroundColor: '#ffffff',
+                borderRadius: '12px',
+                border: '1px solid #e5e7eb',
+                overflowX: 'auto',
+                padding: '20px'
+              }}
+            >
+              <h3 style={{ margin: '0 0 16px', fontSize: '18px' }}>Platform Vendors Summary</h3>
               {reports.length > 0 ? (
                 <table
                   style={{
@@ -1101,21 +1598,25 @@ const AdminDashboard = () => {
                           'Unknown Vendor';
 
                         const customers =
+                          report?.statistics?.total_customers ??
                           report?.total_customers ??
                           report?.customers ??
                           0;
 
                         const stamps =
+                          report?.statistics?.total_stamps ??
                           report?.total_stamps ??
                           report?.stamps ??
                           0;
 
                         const rewards =
+                          report?.statistics?.total_rewards ??
                           report?.total_rewards ??
                           report?.rewards ??
                           0;
 
                         const redemptions =
+                          report?.statistics?.total_redemptions ??
                           report?.total_redemptions ??
                           report?.redemptions ??
                           0;
@@ -1203,6 +1704,103 @@ const AdminDashboard = () => {
                   No reports available.
                 </div>
               )}
+            </div>
+          </section>
+        )}
+
+        {/* SUBSCRIPTIONS */}
+        {activeSection === 'subscriptions' && (
+          <section>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <div>
+                <h2 style={{ margin: 0 }}>Tenant Subscriptions & Billing</h2>
+                <p style={{ margin: '4px 0 0', color: '#6b7280', fontSize: '14px' }}>
+                  Monitor paid subscriptions, active trial periods, and override tenant plans.
+                </p>
+              </div>
+            </div>
+
+            {/* Stat Cards */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+              <div style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '12px', border: '1px solid #e5e7eb', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
+                <div style={{ fontSize: '13px', color: '#64748b', fontWeight: '600' }}>ACTIVE PAID TENANTS</div>
+                <div style={{ fontSize: '28px', fontWeight: '800', color: '#166534', marginTop: '6px' }}>{subSummary?.total_paid_tenants ?? 0}</div>
+              </div>
+
+              <div style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '12px', border: '1px solid #e5e7eb', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
+                <div style={{ fontSize: '13px', color: '#64748b', fontWeight: '600' }}>ACTIVE TRIALS</div>
+                <div style={{ fontSize: '28px', fontWeight: '800', color: '#0369a1', marginTop: '6px' }}>{subSummary?.active_trials ?? 0}</div>
+              </div>
+
+              <div style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '12px', border: '1px solid #e5e7eb', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
+                <div style={{ fontSize: '13px', color: '#64748b', fontWeight: '600' }}>EXPIRED SUBSCRIPTIONS</div>
+                <div style={{ fontSize: '28px', fontWeight: '800', color: '#991b1b', marginTop: '6px' }}>{subSummary?.expired_subscriptions ?? 0}</div>
+              </div>
+            </div>
+
+            {/* Tenant Subscriptions Table */}
+            <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', border: '1px solid #e5e7eb', overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', textAlign: 'left' }}>
+                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Business Name</th>
+                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Plan Type</th>
+                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Status</th>
+                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Days Remaining</th>
+                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Amount Paid</th>
+                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {subscriptions.length > 0 ? (
+                    subscriptions.map((sub) => (
+                      <tr key={sub.tenant_id} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                        <td style={{ padding: '14px 16px', fontWeight: '600', color: '#0f172a' }}>{sub.business_name}</td>
+                        <td style={{ padding: '14px 16px' }}>
+                          <span style={{ padding: '4px 10px', borderRadius: '12px', fontSize: '12px', fontWeight: '700', textTransform: 'uppercase', backgroundColor: '#e0f2fe', color: '#0369a1' }}>
+                            {sub.plan_type}
+                          </span>
+                        </td>
+                        <td style={{ padding: '14px 16px' }}>
+                          <span style={{ padding: '4px 10px', borderRadius: '12px', fontSize: '12px', fontWeight: '700', textTransform: 'uppercase', backgroundColor: sub.status === 'active' ? '#dcfce7' : '#fee2e2', color: sub.status === 'active' ? '#15803d' : '#b91c1c' }}>
+                            {sub.status}
+                          </span>
+                        </td>
+                        <td style={{ padding: '14px 16px', fontWeight: '600' }}>{sub.days_left} Days</td>
+                        <td style={{ padding: '14px 16px', fontWeight: '600' }}>${sub.amount_paid}.00</td>
+                        <td style={{ padding: '14px 16px' }}>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await api.patch(`/admin/subscriptions/${sub.tenant_id}`, {
+                                  plan_type: 'pro',
+                                  status: 'active',
+                                  days_to_add: 30
+                                }, getConfig());
+                                setOnboardingSuccess(`Activated PRO plan for ${sub.business_name}!`);
+                                await loadDashboard();
+                              } catch (err) {
+                                logClientError('Override subscription failed', err);
+                                setError('Failed to override subscription.');
+                              }
+                            }}
+                            style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid #2563eb', backgroundColor: '#ffffff', color: '#2563eb', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}
+                          >
+                            Grant +30 Days Pro
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={6} style={{ padding: '30px', textAlign: 'center', color: '#6b7280' }}>
+                        No subscription records found.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </section>
         )}

@@ -2,6 +2,7 @@ const express = require('express');
 
 const { requireAuth } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
+const { isUuid } = require('../middleware/validation');
 const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
@@ -255,6 +256,13 @@ router.post(
             const staffProfileId = req.profile.id;
             const rewardId = req.params.id;
             const { customer_id } = req.body;
+
+            if (!isUuid(rewardId) || !isUuid(customer_id)) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Valid reward ID and customer ID are required'
+                });
+            }
 
             if (!tenantId) {
                 return res.status(400).json({
@@ -524,8 +532,15 @@ router.patch(
     async (req, res) => {
         try {
             const tenantId = req.profile.tenant_id;
-            const { id } = req.params;
-            const { name, description, is_active } = req.body;
+      const { id } = req.params;
+      const { name, description, is_active } = req.body;
+
+      if (!isUuid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid reward ID is required'
+        });
+      }
 
             if (!tenantId) {
                 return res.status(400).json({
