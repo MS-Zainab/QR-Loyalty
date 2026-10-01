@@ -850,6 +850,19 @@ const StaffDashboard = () => {
                           '1px solid #e5e7eb'
                       }}
                     >
+                      Stamps Collected
+                    </th>
+
+                    <th
+                      style={{
+                        textAlign:
+                          'left',
+                        padding:
+                          '12px',
+                        borderBottom:
+                          '1px solid #e5e7eb'
+                      }}
+                    >
                       Verified At
                     </th>
 
@@ -937,6 +950,31 @@ const StaffDashboard = () => {
                               customerName,
                               'Customer'
                             )}
+                          </td>
+
+                          <td
+                            style={{
+                              padding:
+                                '12px',
+                              borderBottom:
+                                '1px solid #f1f5f9',
+                              fontWeight: '600',
+                              textAlign: 'center'
+                            }}
+                          >
+                            <span
+                              style={{
+                                display: 'inline-block',
+                                backgroundColor: '#eff6ff',
+                                color: '#2563eb',
+                                padding: '4px 12px',
+                                borderRadius: '12px',
+                                fontSize: '14px',
+                                fontWeight: '700'
+                              }}
+                            >
+                              {visit.total_stamps ?? '-'}
+                            </span>
                           </td>
 
                           <td

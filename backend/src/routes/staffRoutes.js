@@ -413,6 +413,21 @@ router.get(
         )
       );
 
+      // Get total stamp count per customer for this tenant
+      const { data: allCustomerStamps } = await supabaseAdmin
+        .from('stamps')
+        .select('customer_id')
+        .eq('tenant_id', tenantId)
+        .in('customer_id', customerIds);
+
+      const customerStampCounts = new Map();
+      (allCustomerStamps || []).forEach((stamp) => {
+        customerStampCounts.set(
+          stamp.customer_id,
+          (customerStampCounts.get(stamp.customer_id) || 0) + 1
+        );
+      });
+
       const result = pendingVisits.map(
         (visit) => ({
           id: visit.id,
@@ -421,6 +436,7 @@ router.get(
           staff_id: visit.staff_id,
           visited_at: visit.visited_at,
           has_stamp: stampedVisitIds.has(visit.id),
+          total_stamps: customerStampCounts.get(visit.customer_id) || 0,
           customer:
             customerMap.get(
               visit.customer_id

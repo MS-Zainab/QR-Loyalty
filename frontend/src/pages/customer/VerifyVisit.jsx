@@ -28,6 +28,80 @@ const VerifyVisit = () => {
   const [cameraError, setCameraError] = useState('');
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const scanIntervalRef = useRef(null);
+  const canvasRef = useRef(null);
+
+  // Cleanup scan interval on unmount
+  useEffect(() => {
+    return () => {
+      if (scanIntervalRef.current) {
+        clearInterval(scanIntervalRef.current);
+        scanIntervalRef.current = null;
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+    };
+  }, []);
+
+  const extractQrValue = (rawValue) => {
+    // If the QR contains a URL with ?qr_code=..., extract just the code
+    try {
+      const url = new URL(rawValue);
+      const code = url.searchParams.get('qr_code');
+      if (code) return code;
+    } catch {
+      // Not a URL — use the raw value
+    }
+    return rawValue.trim();
+  };
+
+  const startScanning = () => {
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+    }
+
+    // Use BarcodeDetector if available, otherwise fall back to canvas-based approach
+    const hasBarcodeDetector = typeof window !== 'undefined' && 'BarcodeDetector' in window;
+
+    if (hasBarcodeDetector) {
+      const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+
+      scanIntervalRef.current = setInterval(async () => {
+        if (!videoRef.current || videoRef.current.readyState < 2) return;
+        try {
+          const barcodes = await detector.detect(videoRef.current);
+          if (barcodes.length > 0) {
+            const value = extractQrValue(barcodes[0].rawValue);
+            if (value) {
+              setManualQrCode(value);
+              setError('');
+              setCameraError('');
+              // Stop scanning
+              clearInterval(scanIntervalRef.current);
+              scanIntervalRef.current = null;
+              if (streamRef.current) {
+                streamRef.current.getTracks().forEach((t) => t.stop());
+                streamRef.current = null;
+              }
+              setCameraActive(false);
+            }
+          }
+        } catch {
+          // Silently continue scanning
+        }
+      }, 400);
+    } else {
+      // Fallback: no native BarcodeDetector — inform user to use manual entry
+      setCameraError('Your browser does not support QR scanning. Please use manual entry or the Upload / Snap Photo option below.');
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+      setCameraActive(false);
+    }
+  };
 
   const getConfig = () => ({
     headers: {
@@ -322,6 +396,8 @@ const VerifyVisit = () => {
                           videoRef.current.srcObject = stream;
                         }
                         setCameraActive(true);
+                        // Start QR code scanning loop
+                        setTimeout(() => startScanning(), 500);
                       } catch (err) {
                         logClientError('Camera access denied or failed', err);
                         setCameraError('Camera access unavailable. Please check permissions or use manual entry / file upload below.');
@@ -347,6 +423,10 @@ const VerifyVisit = () => {
                   <button
                     type="button"
                     onClick={() => {
+                      if (scanIntervalRef.current) {
+                        clearInterval(scanIntervalRef.current);
+                        scanIntervalRef.current = null;
+                      }
                       if (streamRef.current) {
                         streamRef.current.getTracks().forEach((track) => track.stop());
                         streamRef.current = null;

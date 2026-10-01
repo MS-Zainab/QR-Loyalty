@@ -1,10 +1,12 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
 import { logClientError } from '../../services/logging';
 
 const CustomerDashboard = () => {
+  const navigate = useNavigate();
   const { session, profile, logout } = useAuth();
 
   const [customer, setCustomer] = useState(null);

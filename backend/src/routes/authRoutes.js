@@ -369,4 +369,74 @@ router.get(
   }
 );
 
+/**
+ * @swagger
+ * /api/auth/reset-password-request:
+ *   post:
+ *     summary: Request a password reset
+ *     description: Submits a password reset request for a tenant or vendor staff.
+ *     tags:
+ *       - Authentication
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - role
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               role:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Request submitted successfully
+ *       400:
+ *         description: Email and role are required
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/reset-password-request', async (req, res) => {
+  try {
+    const { email, role } = req.body || {};
+
+    if (!email || !role) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and role are required'
+      });
+    }
+
+    const { error } = await supabaseAdmin
+      .from('password_reset_requests')
+      .insert({
+        email: email.trim().toLowerCase(),
+        role: role.trim()
+      });
+
+    if (error) {
+      console.error('Password reset request error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to submit password reset request'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Password reset request submitted successfully'
+    });
+  } catch (error) {
+    console.error('Password reset request error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to submit password reset request'
+    });
+  }
+});
+
 module.exports = router;

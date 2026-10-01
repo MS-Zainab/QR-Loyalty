@@ -1218,4 +1218,129 @@ router.patch(
   }
 );
 
+/**
+ * @swagger
+ * /api/admin/password-resets:
+ *   get:
+ *     summary: Get all password reset requests
+ *     tags:
+ *       - Admin
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get(
+  '/password-resets',
+  requireAuth,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from('password_reset_requests')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Fetch password reset requests error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to fetch password reset requests'
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        requests: data || []
+      });
+    } catch (error) {
+      console.error('Fetch password reset requests error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch password reset requests'
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/admin/password-resets/{id}/reset:
+ *   post:
+ *     summary: Reset password for a request
+ *     tags:
+ *       - Admin
+ *     security:
+ *       - bearerAuth: []
+ */
+router.post(
+  '/password-resets/:id/reset',
+  requireAuth,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { new_password } = req.body;
+
+      if (!new_password) {
+        return res.status(400).json({
+          success: false,
+          message: 'New password is required'
+        });
+      }
+
+      const { data: request, error: reqError } = await supabaseAdmin
+        .from('password_reset_requests')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      if (reqError || !request) {
+        return res.status(404).json({
+          success: false,
+          message: 'Password reset request not found'
+        });
+      }
+
+      // Find user in auth
+      const { data: usersData, error: usersError } = await supabaseAdmin.auth.admin.listUsers();
+      if (usersError) throw usersError;
+
+      const user = usersData.users.find(u => u.email === request.email);
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found in authentication system'
+        });
+      }
+
+      // Update password
+      const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(user.id, {
+        password: new_password
+      });
+
+      if (updateError) throw updateError;
+
+      // Mark request as completed
+      await supabaseAdmin
+        .from('password_reset_requests')
+        .update({
+          status: 'completed',
+          completed_at: new Date().toISOString()
+        })
+        .eq('id', id);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Password has been reset successfully'
+      });
+    } catch (error) {
+      console.error('Password reset error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to reset password'
+      });
+    }
+  }
+);
+
 module.exports = router;
