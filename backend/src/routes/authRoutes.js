@@ -29,11 +29,11 @@ const router = express.Router();
  *               email:
  *                 type: string
  *                 format: email
- *                 example: test@qrloyalty.local
+ *                 example: ''
  *               password:
  *                 type: string
  *                 format: password
- *                 example: QRLoyaltyTest123!
+ *                 example: ''
  *     responses:
  *       200:
  *         description: Login successful

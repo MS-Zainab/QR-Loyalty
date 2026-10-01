@@ -63,6 +63,7 @@ app.use((req, res, next) => {
 app.use(
   cors({
     origin(origin, callback) {
+      // Same-origin requests (e.g. Swagger UI served from the same Railway host) have no Origin header.
       if (!origin) return callback(null, true);
 
       const isLocalDevelopmentOrigin =
@@ -72,7 +73,8 @@ app.use(
         process.env.NODE_ENV === 'production' && productionOrigins.has(origin);
 
       return callback(null, isLocalDevelopmentOrigin || isAllowedProductionOrigin);
-    }
+    },
+    credentials: true
   })
 );
 app.use('/api', (req, res, next) => {

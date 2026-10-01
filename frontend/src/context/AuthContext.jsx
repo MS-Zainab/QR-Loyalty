@@ -120,27 +120,47 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   const login = async (email, password) => {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password
-    });
-
-    if (error) {
-      throw error;
+    // Call our backend login endpoint — it authenticates via Supabase
+    // server-side and returns the bearer token we need.
+    let responseData;
+    try {
+      const response = await api.post('/auth/login', { email, password });
+      responseData = response.data;
+    } catch (err) {
+      // Surface a clean message from the API error body when available.
+      const message =
+        err.response?.data?.message || err.message || 'Login failed';
+      throw new Error(message);
     }
 
-    const userId = data.user?.id || data.session?.user?.id || null;
+    if (!responseData?.success) {
+      throw new Error(responseData?.message || 'Login failed');
+    }
+
+    const { access_token, refresh_token, user } = responseData;
+
+    // Feed the tokens into the Supabase client so onAuthStateChange fires
+    // and the rest of the app (guards, redirects) stays in sync.
+    const { error: sessionError } = await supabase.auth.setSession({
+      access_token,
+      refresh_token
+    });
+
+    if (sessionError) {
+      throw sessionError;
+    }
+
+    const userId = user?.id || null;
     activeUserId.current = userId;
-    setSession(data.session);
 
     let loadedProfile = null;
-
-    if (data.session?.access_token) {
-      loadedProfile = await loadProfile(data.session.access_token, userId);
+    if (access_token) {
+      loadedProfile = await loadProfile(access_token, userId);
     }
 
     return {
-      ...data,
+      session: { access_token, refresh_token, user },
+      user,
       profile: loadedProfile
     };
   };
