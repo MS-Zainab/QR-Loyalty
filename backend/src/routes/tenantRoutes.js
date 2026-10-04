@@ -74,6 +74,19 @@ router.post(
         });
       }
 
+      // Auto-generate business QR code for new vendor
+      try {
+        const crypto = require('crypto');
+        const qrCodeValue = crypto.randomBytes(16).toString('hex');
+        await supabaseAdmin.from('qr_codes').insert({
+          tenant_id: tenant.id,
+          code: qrCodeValue,
+          is_active: true
+        });
+      } catch (qrErr) {
+        console.error('Auto QR creation error on tenant onboard:', qrErr);
+      }
+
       return res.status(201).json({
         success: true,
         message: 'Vendor created successfully',

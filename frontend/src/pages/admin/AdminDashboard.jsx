@@ -35,6 +35,14 @@ const AdminDashboard = () => {
   const [subscriptions, setSubscriptions] = useState([]);
   const [subSummary, setSubSummary] = useState(null);
 
+  // Admin Grant Subscription State
+  const [showGrantSubModal, setShowGrantSubModal] = useState(false);
+  const [grantTenantId, setGrantTenantId] = useState('');
+  const [grantTenantName, setGrantTenantName] = useState('');
+  const [grantPlanDuration, setGrantPlanDuration] = useState('monthly');
+  const [grantLoading, setGrantLoading] = useState(false);
+  const [grantSuccess, setGrantSuccess] = useState('');
+
   const getConfig = (signal) => ({
     headers: {
       Authorization: `Bearer ${session?.access_token}`
@@ -101,22 +109,9 @@ const AdminDashboard = () => {
         dashboardResponse.data?.dashboard ?? dashboardResponse.data;
       setDashboard(dashboardData);
 
-      /*
-       * Admin vendors response can be either:
-       *
-       * {
-       *   vendors: [...]
-       * }
-       *
-       * or
-       *
-       * [...]
-       *
-       * Normalize it to an array.
-       */
       const vendorData =
-        dashboardData?.vendors ||
         vendorsResponse.data?.vendors ||
+        dashboardData?.vendors ||
         vendorsResponse.data ||
         [];
 
@@ -251,6 +246,37 @@ const AdminDashboard = () => {
       );
     } finally {
       setOnboardLoading(false);
+    }
+  };
+
+  const handleGrantSubscription = async (e) => {
+    if (e) e.preventDefault();
+    setError('');
+    setGrantSuccess('');
+
+    if (!grantTenantId) {
+      setError('Please select a vendor to grant subscription.');
+      return;
+    }
+
+    try {
+      setGrantLoading(true);
+      const res = await api.post(`/admin/subscriptions/${grantTenantId}/grant`, {
+        plan_duration: grantPlanDuration
+      }, getConfig());
+
+      setGrantSuccess(res.data?.message || 'Subscription package granted successfully!');
+      setShowGrantSubModal(false);
+      await loadDashboard();
+    } catch (err) {
+      logClientError('Grant subscription failed', err);
+      setError(
+        err?.response?.data?.message ||
+        err?.response?.data?.error ||
+        'Failed to grant subscription package.'
+      );
+    } finally {
+      setGrantLoading(false);
     }
   };
 
@@ -1803,6 +1829,98 @@ const AdminDashboard = () => {
               </table>
             </div>
           </section>
+        )}
+
+        {/* Grant Subscription Modal */}
+        {showGrantSubModal && (
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0,0,0,0.5)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '20px',
+              zIndex: 1000
+            }}
+          >
+            <div
+              style={{
+                backgroundColor: '#ffffff',
+                borderRadius: '16px',
+                padding: '28px',
+                width: '100%',
+                maxWidth: '480px',
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <h3 style={{ margin: 0, fontSize: '20px' }}>Grant Subscription Package</h3>
+                <button
+                  type="button"
+                  onClick={() => setShowGrantSubModal(false)}
+                  style={{ border: 'none', background: 'transparent', fontSize: '20px', cursor: 'pointer', color: '#64748b' }}
+                >
+                  ✕
+                </button>
+              </div>
+
+              <p style={{ fontSize: '13px', color: '#64748b', marginBottom: '16px' }}>
+                This is an administrative grant for testing or vendor promotion. It will mark the vendor's subscription status as <strong>Active</strong> and payment status as <strong>Granted</strong> (not real payment).
+              </p>
+
+              <form onSubmit={handleGrantSubscription}>
+                <div style={{ marginBottom: '14px' }}>
+                  <label style={{ display: 'block', marginBottom: '6px', fontWeight: '600', fontSize: '14px' }}>
+                    Vendor / Business
+                  </label>
+                  <input
+                    type="text"
+                    disabled
+                    value={grantTenantName}
+                    style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', border: '1px solid #cbd5e1', borderRadius: '8px', backgroundColor: '#f1f5f9', fontWeight: '600' }}
+                  />
+                </div>
+
+                <div style={{ marginBottom: '20px' }}>
+                  <label style={{ display: 'block', marginBottom: '6px', fontWeight: '600', fontSize: '14px' }}>
+                    Subscription Package Duration
+                  </label>
+                  <select
+                    value={grantPlanDuration}
+                    onChange={(e) => setGrantPlanDuration(e.target.value)}
+                    style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '15px' }}
+                  >
+                    <option value="monthly">Monthly (30 Days)</option>
+                    <option value="3_months">3 Months (90 Days)</option>
+                    <option value="6_months">6 Months (180 Days)</option>
+                    <option value="yearly">Yearly (365 Days)</option>
+                  </select>
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowGrantSubModal(false)}
+                    style={{ padding: '10px 18px', border: '1px solid #cbd5e1', borderRadius: '8px', backgroundColor: '#ffffff', color: '#475569', fontWeight: '600', cursor: 'pointer' }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={grantLoading}
+                    style={{ padding: '10px 18px', border: 'none', borderRadius: '8px', backgroundColor: '#2563eb', color: '#ffffff', fontWeight: '600', cursor: grantLoading ? 'not-allowed' : 'pointer' }}
+                  >
+                    {grantLoading ? 'Granting...' : 'Confirm & Grant Package'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
         )}
       </main>
     </div>

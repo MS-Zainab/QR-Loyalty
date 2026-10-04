@@ -1120,12 +1120,17 @@ router.get(
           ? Math.max(0, Math.ceil((new Date(sub.current_period_end) - new Date()) / (1000 * 60 * 60 * 24)))
           : Math.max(0, Math.ceil((trialEnds - new Date()) / (1000 * 60 * 60 * 24)));
 
+        const subStatus = sub?.status || (daysLeft > 0 ? 'active' : 'expired');
+        const paymentStatus = sub?.payment_status || (sub?.amount_paid > 0 ? 'paid' : sub?.plan_type && sub.plan_type !== 'trial' ? 'granted' : 'trial');
+
         return {
           tenant_id: t.id,
           business_name: t.business_name,
           tenant_status: t.status,
           plan_type: sub?.plan_type || 'trial',
-          status: sub?.status || (daysLeft > 0 ? 'active' : 'expired'),
+          subscription_status: subStatus,
+          status: subStatus,
+          payment_status: paymentStatus,
           amount_paid: sub?.amount_paid || 0,
           billing_cycle: sub?.billing_cycle || 'monthly',
           days_left: daysLeft,
@@ -1133,14 +1138,16 @@ router.get(
         };
       });
 
-      const totalPaid = tenantSubscriptions.filter((s) => s.plan_type !== 'trial' && s.status === 'active').length;
-      const totalTrial = tenantSubscriptions.filter((s) => s.plan_type === 'trial' && s.status === 'active').length;
+      const totalPaid = tenantSubscriptions.filter((s) => s.payment_status === 'paid' && s.status === 'active').length;
+      const totalGranted = tenantSubscriptions.filter((s) => s.payment_status === 'granted' && s.status === 'active').length;
+      const totalTrial = tenantSubscriptions.filter((s) => s.payment_status === 'trial' && s.status === 'active').length;
       const totalExpired = tenantSubscriptions.filter((s) => s.status === 'expired').length;
 
       return res.status(200).json({
         success: true,
         summary: {
           total_paid_tenants: totalPaid,
+          total_granted_tenants: totalGranted,
           active_trials: totalTrial,
           expired_subscriptions: totalExpired
         },
@@ -1151,6 +1158,79 @@ router.get(
       return res.status(500).json({
         success: false,
         message: 'Failed to retrieve subscription data'
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/admin/subscriptions/{tenantId}/grant:
+ *   post:
+ *     summary: Safe admin action to grant a subscription package to a vendor (administrative grant, not a real payment)
+ */
+router.post(
+  '/subscriptions/:tenantId/grant',
+  requireAuth,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const { tenantId } = req.params;
+      const { plan_duration = 'monthly', plan_name, start_date, end_date } = req.body || {};
+
+      let daysToAdd = 30;
+      if (plan_duration === '3_months') daysToAdd = 90;
+      else if (plan_duration === '6_months') daysToAdd = 180;
+      else if (plan_duration === 'yearly') daysToAdd = 365;
+
+      const startDateObj = start_date ? new Date(start_date) : new Date();
+      const periodEnd = end_date
+        ? new Date(end_date).toISOString()
+        : new Date(startDateObj.getTime() + daysToAdd * 24 * 60 * 60 * 1000).toISOString();
+
+      const chosenPlanName = plan_name || (plan_duration === 'yearly' ? 'Yearly Pro' : `${plan_duration.replace('_', ' ')} Plan`);
+
+      const { data: existing } = await supabaseAdmin
+        .from('subscriptions')
+        .select('id')
+        .eq('tenant_id', tenantId)
+        .maybeSingle();
+
+      const subFields = {
+        tenant_id: tenantId,
+        plan_type: chosenPlanName,
+        status: 'active',
+        payment_status: 'granted', // Explicitly marked as admin grant, NOT real payment
+        amount_paid: 0,
+        billing_cycle: plan_duration,
+        current_period_end: periodEnd,
+        updated_at: new Date().toISOString()
+      };
+
+      if (existing) {
+        await supabaseAdmin
+          .from('subscriptions')
+          .update(subFields)
+          .eq('id', existing.id);
+      } else {
+        await supabaseAdmin
+          .from('subscriptions')
+          .insert(subFields);
+      }
+
+      // Ensure tenant is active
+      await supabaseAdmin.from('tenants').update({ status: 'active', updated_at: new Date().toISOString() }).eq('id', tenantId);
+
+      return res.status(200).json({
+        success: true,
+        message: `Subscription package (${chosenPlanName}) granted successfully to vendor!`,
+        subscription: subFields
+      });
+    } catch (error) {
+      console.error('Admin grant subscription error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to grant subscription package'
       });
     }
   }
