@@ -314,23 +314,30 @@ router.post(
           .maybeSingle()
       ]);
 
-      if (customerError) {
-        console.error(
-          'Customer lookup error:',
-          customerError
-        );
+      let activeCustomer = customer;
+      if (!activeCustomer) {
+        // Auto-enroll customer for this tenant upon scanning vendor QR
+        const { data: newCustomer, error: enrollError } = await supabaseAdmin
+          .from('customers')
+          .insert({
+            tenant_id: tenantId,
+            profile_id: req.profile.id,
+            name: req.profile.full_name || 'Customer',
+            phone: req.profile.phone || null,
+            email: req.user.email || null,
+            status: 'active'
+          })
+          .select('id, tenant_id, profile_id, name, status')
+          .single();
 
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to find customer'
-        });
-      }
-
-      if (!customer) {
-        return res.status(404).json({
-          success: false,
-          message: 'Customer is not registered with this vendor'
-        });
+        if (enrollError || !newCustomer) {
+          console.error('Auto-enroll customer error:', enrollError);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to register customer for this vendor'
+          });
+        }
+        activeCustomer = newCustomer;
       }
 
       if (staffError) {
@@ -385,7 +392,7 @@ router.post(
           .from('visits')
           .insert({
             tenant_id: tenantId,
-            customer_id: customer.id,
+            customer_id: activeCustomer.id,
             staff_id: verificationCode.staff_id
           })
           .select(
@@ -412,7 +419,7 @@ router.post(
           .from('stamps')
           .insert({
             tenant_id: tenantId,
-            customer_id: customer.id,
+            customer_id: activeCustomer.id,
             staff_id: verificationCode.staff_id,
             visit_id: visit.id
           })
@@ -433,7 +440,7 @@ router.post(
         message: 'Customer verified successfully and stamp recorded',
         verification: {
           tenant_id: tenantId,
-          customer_id: customer.id,
+          customer_id: activeCustomer.id,
           staff_id: verificationCode.staff_id,
           visit_id: visit.id,
           visited_at: visit.visited_at

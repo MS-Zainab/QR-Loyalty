@@ -74,7 +74,13 @@ function App() {
           />
         </Route>
 
-        {/* Customer routes */}
+        {/* Customer entry / visit verification route */}
+        <Route
+          path="/customer/verify"
+          element={<VerifyVisit />}
+        />
+
+        {/* Customer Dashboard routes */}
         <Route
           element={
             <ProtectedRoute
@@ -85,11 +91,6 @@ function App() {
           <Route
             path="/customer"
             element={<CustomerDashboard />}
-          />
-
-          <Route
-            path="/customer/verify"
-            element={<VerifyVisit />}
           />
         </Route>
 

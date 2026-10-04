@@ -8,6 +8,30 @@ const { createRateLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
 
+function normalizePhoneNumber(phoneInput) {
+  if (!phoneInput || typeof phoneInput !== 'string') return null;
+
+  const cleaned = phoneInput.replace(/[\s\-\.\(\)]/g, '').trim();
+
+  // Validate Pakistan mobile formats: 03XXXXXXXXX, 923XXXXXXXXX, +923XXXXXXXXX
+  const pkMatch = cleaned.match(/^(?:\+?92|0)?(3\d{9})$/);
+  if (pkMatch) {
+    return `+92${pkMatch[1]}`;
+  }
+
+  // General E.164 phone numbers (10 to 15 digits)
+  const intlMatch = cleaned.match(/^(\+?\d{10,15})$/);
+  if (intlMatch) {
+    let num = intlMatch[1];
+    if (!num.startsWith('+')) {
+      num = '+' + num;
+    }
+    return num;
+  }
+
+  return null;
+}
+
 /**
  * @swagger
  * /api/auth/login:
@@ -167,40 +191,61 @@ router.post(
         });
       }
 
-      const cleanPhone = phone_number.replace(/[^\d+]/g, '');
-      if (cleanPhone.length < 7) {
+      const normalizedPhone = normalizePhoneNumber(phone_number);
+      if (!normalizedPhone) {
         return res.status(400).json({
           success: false,
-          message: 'Please provide a valid phone number (at least 7 digits)'
+          message: 'Please provide a valid phone number (e.g. 03XXXXXXXXX or +923XXXXXXXXX)'
         });
       }
 
       const formattedName = full_name.trim();
-      const customerEmail = `cust_${cleanPhone.replace('+', '')}@qrloyalty.local`;
-      const customerPassword = `Customer_${cleanPhone.replace('+', '')}_Pass!`;
+      const canonicalDigits = normalizedPhone.replace('+', '');
+      const customerEmail = `cust_${canonicalDigits}@qrloyalty.local`;
+      const customerPassword = `Customer_${canonicalDigits}_Pass!`;
 
-      // Check if user already exists in auth
-      const { data: existingUser } = await supabase.auth.signInWithPassword({
+      // Check legacy email fallback (e.g. if user registered prior using raw 03... format)
+      const rawDigits = phone_number.replace(/[^\d]/g, '');
+      const legacyEmail = rawDigits ? `cust_${rawDigits}@qrloyalty.local` : null;
+      const legacyPassword = rawDigits ? `Customer_${rawDigits}_Pass!` : null;
+
+      let authUserSession = null;
+
+      // 1. Try canonical email
+      const { data: canonicalUser } = await supabase.auth.signInWithPassword({
         email: customerEmail,
         password: customerPassword
       });
 
-      if (existingUser && existingUser.session) {
+      if (canonicalUser && canonicalUser.session) {
+        authUserSession = canonicalUser;
+      } else if (legacyEmail && legacyEmail !== customerEmail) {
+        // 2. Fallback to legacy email if present
+        const { data: legacyUser } = await supabase.auth.signInWithPassword({
+          email: legacyEmail,
+          password: legacyPassword
+        });
+        if (legacyUser && legacyUser.session) {
+          authUserSession = legacyUser;
+        }
+      }
+
+      if (authUserSession && authUserSession.session) {
         // Retrieve profile
         const { data: profile } = await supabaseAdmin
           .from('profiles')
           .select('*')
-          .eq('auth_user_id', existingUser.user.id)
+          .eq('auth_user_id', authUserSession.user.id)
           .maybeSingle();
 
         return res.status(200).json({
           success: true,
           message: 'Customer authenticated successfully',
-          access_token: existingUser.session.access_token,
-          refresh_token: existingUser.session.refresh_token,
-          user: existingUser.user,
+          access_token: authUserSession.session.access_token,
+          refresh_token: authUserSession.session.refresh_token,
+          user: authUserSession.user,
           profile: profile || {
-            id: existingUser.user.id,
+            id: authUserSession.user.id,
             full_name: formattedName,
             role: 'customer',
             status: 'active'
@@ -215,7 +260,7 @@ router.post(
         email_confirm: true,
         user_metadata: {
           full_name: formattedName,
-          phone: cleanPhone,
+          phone: normalizedPhone,
           role: 'customer'
         }
       });

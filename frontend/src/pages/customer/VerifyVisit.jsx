@@ -11,12 +11,14 @@ import { logClientError } from '../../services/logging';
 const VerifyVisit = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { session } = useAuth();
+  const { session, profile, customerLogin } = useAuth();
 
   const qrCodeFromUrl = searchParams.get('qr_code') || '';
   const [manualQrCode, setManualQrCode] = useState('');
   const qrCode = qrCodeFromUrl || manualQrCode;
 
+  const [fullName, setFullName] = useState('');
+  const [phoneNumber, setPhoneNumber] = useState('');
   const [pin, setPin] = useState('');
   const [verifying, setVerifying] = useState(false);
 
@@ -148,9 +150,32 @@ const VerifyVisit = () => {
 
     if (!qrCode) {
       setError(
-        'Business QR code is missing. Please scan the business QR code again.'
+        'Business QR code is missing. Please scan the business QR code again or select/enter code manually.'
       );
       return;
+    }
+
+    const isCustomerAuthenticated = Boolean(session && profile);
+
+    if (!isCustomerAuthenticated) {
+      if (!fullName.trim()) {
+        setError('Please enter your full name.');
+        return;
+      }
+      if (!phoneNumber.trim()) {
+        setError('Please enter your phone number.');
+        return;
+      }
+
+      // Phone validation (Pakistan format 03XXXXXXXXX or +923XXXXXXXXX, or standard international)
+      const cleanedPhone = phoneNumber.replace(/[\s\-\.\(\)]/g, '').trim();
+      const isPkValid = /^(?:\+?92|0)?3\d{9}$/.test(cleanedPhone);
+      const isIntlValid = /^\+?\d{10,15}$/.test(cleanedPhone);
+
+      if (!isPkValid && !isIntlValid) {
+        setError('Please provide a valid phone number (e.g. 03XXXXXXXXX or +923XXXXXXXXX)');
+        return;
+      }
     }
 
     if (!pin.trim()) {
@@ -169,24 +194,31 @@ const VerifyVisit = () => {
 
     try {
       setVerifying(true);
+      let authSession = session;
 
+      if (!isCustomerAuthenticated) {
+        const loginResult = await customerLogin(fullName.trim(), phoneNumber.trim());
+        authSession = loginResult?.session;
+      }
+
+      const token = authSession?.access_token;
       const response = await api.post(
         '/verification/verify',
         {
           qr_code: qrCode,
           pin: pin.trim()
         },
-        getConfig()
+        token ? { headers: { Authorization: `Bearer ${token}` } } : getConfig()
       );
 
       const message =
         response.data?.message ||
-        'Visit verified successfully.';
+        'Visit verified successfully! Stamp added.';
 
       setSuccess(
         getDisplayValue(
           message,
-          'Visit verified successfully.'
+          'Visit verified successfully! Stamp added.'
         )
       );
 
@@ -553,6 +585,88 @@ const VerifyVisit = () => {
               marginTop: '16px'
             }}
           >
+            {session && profile ? (
+              <div style={{ marginBottom: '18px', padding: '12px 14px', backgroundColor: '#eff6ff', borderRadius: '8px', border: '1px solid #bfdbfe' }}>
+                <span style={{ fontSize: '13px', color: '#1e40af', fontWeight: '600' }}>
+                  Member Check-in:
+                </span>{' '}
+                <strong style={{ color: '#1e293b' }}>{profile.full_name || 'Customer'}</strong>
+              </div>
+            ) : (
+              <div style={{ marginBottom: '18px' }}>
+                <div style={{ marginBottom: '14px' }}>
+                  <label
+                    htmlFor="customer-name"
+                    style={{
+                      display: 'block',
+                      marginBottom: '6px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: '#334155'
+                    }}
+                  >
+                    Your Name
+                  </label>
+                  <input
+                    id="customer-name"
+                    type="text"
+                    required
+                    value={fullName}
+                    onChange={(e) => {
+                      setFullName(e.target.value);
+                      setError('');
+                    }}
+                    placeholder="Enter your full name"
+                    style={{
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      padding: '11px 14px',
+                      border: '1px solid #cbd5e1',
+                      borderRadius: '8px',
+                      fontSize: '15px'
+                    }}
+                  />
+                </div>
+
+                <div style={{ marginBottom: '14px' }}>
+                  <label
+                    htmlFor="customer-phone"
+                    style={{
+                      display: 'block',
+                      marginBottom: '6px',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      color: '#334155'
+                    }}
+                  >
+                    Phone Number
+                  </label>
+                  <input
+                    id="customer-phone"
+                    type="tel"
+                    required
+                    value={phoneNumber}
+                    onChange={(e) => {
+                      setPhoneNumber(e.target.value);
+                      setError('');
+                    }}
+                    placeholder="03XXXXXXXXX or +923XXXXXXXXX"
+                    style={{
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      padding: '11px 14px',
+                      border: '1px solid #cbd5e1',
+                      borderRadius: '8px',
+                      fontSize: '15px'
+                    }}
+                  />
+                  <span style={{ fontSize: '12px', color: '#64748b', marginTop: '4px', display: 'block' }}>
+                    Pakistan mobile format: 03001234567 or +923001234567
+                  </span>
+                </div>
+              </div>
+            )}
+
             <label
               htmlFor="staff-pin"
               style={{
