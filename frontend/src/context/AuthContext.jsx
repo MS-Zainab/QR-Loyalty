@@ -81,6 +81,20 @@ export const AuthProvider = ({ children }) => {
 
     initializeAuth();
 
+    const handleFocus = async () => {
+      const { data: { session: focusSession } } = await supabase.auth.getSession();
+      if (!active) return;
+      if (focusSession?.access_token && focusSession?.access_token !== activeUserId.current) {
+        const userId = focusSession?.user?.id || null;
+        activeUserId.current = userId;
+        setSession(focusSession);
+        if (focusSession?.access_token) {
+          loadProfile(focusSession.access_token, userId);
+        }
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+
     const {
       data: { subscription }
     } = supabase.auth.onAuthStateChange((_event, currentSession) => {
@@ -115,6 +129,7 @@ export const AuthProvider = ({ children }) => {
 
     return () => {
       active = false;
+      window.removeEventListener('focus', handleFocus);
       subscription.unsubscribe();
     };
   }, []);
