@@ -884,7 +884,7 @@ router.post(
         subData = created;
       }
 
-      await supabaseAdmin.from('tenants').update({ status: 'ACTIVE' }).eq('id', tenantId);
+      await supabaseAdmin.from('tenants').update({ status: 'active', updated_at: new Date().toISOString() }).eq('id', tenantId);
 
       return res.status(200).json({
         success: true,

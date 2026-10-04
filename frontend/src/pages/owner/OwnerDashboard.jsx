@@ -47,6 +47,8 @@ const OwnerDashboard = () => {
   const [subscription, setSubscription] = useState(null);
   const [subLoading, setSubLoading] = useState(false);
   const [subSuccess, setSubSuccess] = useState('');
+  const [selectedPlanForCheckout, setSelectedPlanForCheckout] = useState(null);
+  const [showCheckoutModal, setShowCheckoutModal] = useState(false);
 
   const getConfig = (signal) => ({
     headers: {
@@ -144,54 +146,84 @@ const OwnerDashboard = () => {
     }
   };
 
-  const handleUpgradePlan = async (planType) => {
+  const handleOpenCheckout = (planKey, planName, price) => {
+    setError('');
+    setSubSuccess('');
+    setSelectedPlanForCheckout({ planKey, planName, price });
+    setShowCheckoutModal(true);
+  };
+
+  const handleConfirmCheckout = async () => {
+    if (!selectedPlanForCheckout) return;
     try {
+      setSubLoading(true);
       setError('');
       setSubSuccess('');
       const response = await api.post('/owner/subscription/upgrade', {
-        plan_type: planType,
+        plan_type: selectedPlanForCheckout.planKey,
         billing_cycle: 'monthly'
       }, getConfig());
-      setSubSuccess(response.data?.message || 'Plan updated successfully!');
+      setSubSuccess(response.data?.message || `Successfully subscribed to ${selectedPlanForCheckout.planName}!`);
+      setShowCheckoutModal(false);
+      setSelectedPlanForCheckout(null);
       await loadSubscription();
     } catch (err) {
       logClientError('Upgrade plan failed', err);
       setError(err?.response?.data?.message || 'Failed to update subscription plan.');
+    } finally {
+      setSubLoading(false);
     }
   };
 
   const loadQr = async (signal) => {
-    const response = await api.get(
-      '/qr',
-      getConfig(signal)
-    );
+    try {
+      let response = await api.get(
+        '/qr',
+        getConfig(signal)
+      );
 
-    if (signal?.aborted) return;
+      if (signal?.aborted) return;
 
-    const qrRecord =
-      response.data?.qr_code ||
-      response.data?.qr ||
-      null;
+      let qrRecord =
+        response.data?.qr_code ||
+        response.data?.qr ||
+        null;
 
-    setQr(qrRecord);
+      // Requirement 7: If QR code does not exist, safely create/associate one
+      if (!qrRecord) {
+        const createRes = await api.post(
+          '/qr',
+          {},
+          getConfig(signal)
+        );
+        if (!signal?.aborted) {
+          qrRecord = createRes.data?.qr_code || createRes.data?.qr || null;
+        }
+      }
 
-    if (qrRecord?.code) {
-      const verificationUrl =
-        `${window.location.origin}/customer/verify?qr_code=${encodeURIComponent(
-          qrRecord.code
-        )}`;
+      setQr(qrRecord);
 
-      QRCode.toDataURL(verificationUrl, {
-        width: 320,
-        margin: 2
-      }).then((image) => {
-        if (!signal?.aborted) setQrImage(image);
-      }).catch((err) => {
-        if (signal?.aborted) return;
-        logClientError('QR image generation failed', err);
-      });
-    } else {
-      setQrImage('');
+      if (qrRecord?.code) {
+        const verificationUrl =
+          `${window.location.origin}/customer/verify?qr_code=${encodeURIComponent(
+            qrRecord.code
+          )}`;
+
+        QRCode.toDataURL(verificationUrl, {
+          width: 320,
+          margin: 2
+        }).then((image) => {
+          if (!signal?.aborted) setQrImage(image);
+        }).catch((err) => {
+          if (signal?.aborted) return;
+          logClientError('QR image generation failed', err);
+        });
+      } else {
+        setQrImage('');
+      }
+    } catch (err) {
+      if (signal?.aborted) return;
+      logClientError('Load or generate QR failed', err);
     }
   };
 
@@ -1605,7 +1637,7 @@ const OwnerDashboard = () => {
               <button
                 type="button"
                 disabled={subLoading || subscription?.plan_type === 'basic'}
-                onClick={() => handleUpgradePlan('basic')}
+                onClick={() => handleOpenCheckout('basic', 'Basic Plan', 19)}
                 style={{
                   width: '100%',
                   padding: '10px',
@@ -1635,7 +1667,7 @@ const OwnerDashboard = () => {
               <button
                 type="button"
                 disabled={subLoading || subscription?.plan_type === 'pro'}
-                onClick={() => handleUpgradePlan('pro')}
+                onClick={() => handleOpenCheckout('pro', 'Pro Plan', 49)}
                 style={{
                   width: '100%',
                   padding: '10px',
@@ -1663,7 +1695,7 @@ const OwnerDashboard = () => {
               <button
                 type="button"
                 disabled={subLoading || subscription?.plan_type === 'enterprise'}
-                onClick={() => handleUpgradePlan('enterprise')}
+                onClick={() => handleOpenCheckout('enterprise', 'Enterprise Plan', 99)}
                 style={{
                   width: '100%',
                   padding: '10px',
@@ -1679,6 +1711,56 @@ const OwnerDashboard = () => {
               </button>
             </div>
           </div>
+
+          {/* Test/Mock Checkout Modal */}
+          {showCheckoutModal && selectedPlanForCheckout && (
+            <div style={styles.modalOverlay}>
+              <div style={styles.modalContent}>
+                <h3 style={styles.modalTitle}>Review Plan & Checkout</h3>
+                <p style={styles.modalSubtitle}>Review your order summary before completing subscription upgrade.</p>
+
+                <div style={{ backgroundColor: '#f8fafc', padding: '16px', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <span style={{ color: '#64748b' }}>Selected Package:</span>
+                    <strong style={{ color: '#0f172a' }}>{selectedPlanForCheckout.planName}</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <span style={{ color: '#64748b' }}>Billing Cycle:</span>
+                    <strong style={{ color: '#0f172a' }}>Monthly</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: '8px', borderTop: '1px solid #cbd5e1' }}>
+                    <span style={{ color: '#0f172a', fontWeight: '700' }}>Total Due:</span>
+                    <strong style={{ color: '#2563eb', fontSize: '18px' }}>${selectedPlanForCheckout.price}.00 / mo</strong>
+                  </div>
+                </div>
+
+                <div style={{ backgroundColor: '#fef3c7', color: '#92400e', padding: '12px', borderRadius: '6px', fontSize: '13px', marginBottom: '20px', border: '1px solid #fde68a' }}>
+                  ⚙️ <strong>Development / Testing Mode:</strong> Real payment gateway integration (Stripe/JazzCash) is pending API credentials. Clicking "Confirm Subscription Update" will execute a controlled mock checkout and immediately update your subscription state.
+                </div>
+
+                <div style={styles.modalActions}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCheckoutModal(false);
+                      setSelectedPlanForCheckout(null);
+                    }}
+                    style={styles.cancelButton}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={subLoading}
+                    onClick={handleConfirmCheckout}
+                    style={styles.primaryButton}
+                  >
+                    {subLoading ? 'Processing Checkout...' : 'Confirm Subscription Update'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </section>
       )}
     </div>
