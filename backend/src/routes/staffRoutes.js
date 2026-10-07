@@ -211,15 +211,15 @@ router.get(
  * @swagger
  * /api/staff/verified-visits:
  *   get:
- *     summary: Get recent verified customer visits
- *     description: Returns recent customer visits verified by the authenticated staff member that have not yet received a stamp.
+ *     summary: Get aggregated customer list for staff
+ *     description: Returns a deduplicated list of customers verified by the authenticated staff member, sorted by most recent visit. Each entry includes total visits, total stamps, and last visit timestamp.
  *     tags:
  *       - Staff
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       200:
- *         description: Verified visits retrieved successfully
+ *         description: Customer list retrieved successfully
  *       401:
  *         description: Authentication required
  *       403:
@@ -295,7 +295,7 @@ router.get(
         });
       }
 
-      // Get recent visits verified by this staff member
+      // Get recent visits verified by this staff member (last 50 for aggregation)
       const { data: visits, error: visitsError } =
         await supabaseAdmin
           .from('visits')
@@ -307,7 +307,7 @@ router.get(
           .order('visited_at', {
             ascending: false
           })
-          .limit(20);
+          .limit(50);
 
       if (visitsError) {
         console.error(
@@ -325,100 +325,44 @@ router.get(
         return res.status(200).json({
           success: true,
           message: 'No verified visits found',
-          visits: []
+          customers: []
         });
       }
 
-      // Get stamps already issued for these visits
-      const visitIds = visits.map(
-        (visit) => visit.id
-      );
+      // Aggregate by customer: find most recent visit per customer
+      const customerVisitMap = new Map();
+      for (const visit of visits) {
+        const existing = customerVisitMap.get(visit.customer_id);
+        if (!existing || new Date(visit.visited_at) > new Date(existing.visited_at)) {
+          customerVisitMap.set(visit.customer_id, visit);
+        }
+      }
 
-      const { data: stamps, error: stampsError } =
-        await supabaseAdmin
-          .from('stamps')
-          .select(
-            'id, visit_id, customer_id, created_at'
-          )
-          .eq('tenant_id', tenantId)
-          .in('visit_id', visitIds);
+      const uniqueCustomerIds = [...customerVisitMap.keys()];
 
-      if (stampsError) {
-        console.error(
-          'Verified visit stamp lookup error:',
-          stampsError
-        );
+      // Get customer details
+      const { data: customers, error: customersError } = await supabaseAdmin
+        .from('customers')
+        .select('id, name, phone, email, status, created_at')
+        .eq('tenant_id', tenantId)
+        .in('id', uniqueCustomerIds);
 
+      if (customersError) {
+        console.error('Staff customer lookup error:', customersError);
         return res.status(500).json({
           success: false,
-          message: 'Failed to check visit stamp status'
+          message: 'Failed to retrieve customer information'
         });
       }
 
-      // We no longer filter out stamped visits, because the stamp is issued automatically upon verification.
-      // Instead, we mark them as having a stamp so the UI can disable the "Issue Stamp" button if needed.
-      const stampedVisitIds = new Set(
-        (stamps || []).map(
-          (stamp) => stamp.visit_id
-        )
-      );
-
-      // Return all recent visits
-      const pendingVisits = visits;
-
-      // Get customer information
-      const customerIds = [
-        ...new Set(
-          pendingVisits.map(
-            (visit) => visit.customer_id
-          )
-        )
-      ];
-
-      let customers = [];
-
-      if (customerIds.length > 0) {
-        const {
-          data: customerData,
-          error: customersError
-        } = await supabaseAdmin
-          .from('customers')
-          .select(
-            'id, name, phone, email, status'
-          )
-          .eq('tenant_id', tenantId)
-          .in('id', customerIds);
-
-        if (customersError) {
-          console.error(
-            'Staff customer lookup error:',
-            customersError
-          );
-
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve customer information'
-          });
-        }
-
-        customers = customerData || [];
-      }
-
-      const customerMap = new Map(
-        customers.map(
-          (customer) => [
-            customer.id,
-            customer
-          ]
-        )
-      );
+      const customerMap = new Map((customers || []).map((c) => [c.id, c]));
 
       // Get total stamp count per customer for this tenant
       const { data: allCustomerStamps } = await supabaseAdmin
         .from('stamps')
         .select('customer_id')
         .eq('tenant_id', tenantId)
-        .in('customer_id', customerIds);
+        .in('customer_id', uniqueCustomerIds);
 
       const customerStampCounts = new Map();
       (allCustomerStamps || []).forEach((stamp) => {
@@ -428,26 +372,44 @@ router.get(
         );
       });
 
-      const result = pendingVisits.map(
-        (visit) => ({
-          id: visit.id,
-          tenant_id: visit.tenant_id,
-          customer_id: visit.customer_id,
-          staff_id: visit.staff_id,
-          visited_at: visit.visited_at,
-          has_stamp: stampedVisitIds.has(visit.id),
-          total_stamps: customerStampCounts.get(visit.customer_id) || 0,
-          customer:
-            customerMap.get(
-              visit.customer_id
-            ) || null
+      // Get total visit count per customer for this tenant
+      const { data: allCustomerVisits } = await supabaseAdmin
+        .from('visits')
+        .select('customer_id')
+        .eq('tenant_id', tenantId)
+        .in('customer_id', uniqueCustomerIds);
+
+      const customerVisitCounts = new Map();
+      (allCustomerVisits || []).forEach((v) => {
+        customerVisitCounts.set(
+          v.customer_id,
+          (customerVisitCounts.get(v.customer_id) || 0) + 1
+        );
+      });
+
+      // Build aggregated customer list sorted by most recent visit
+      const result = uniqueCustomerIds
+        .map((customerId) => {
+          const latestVisit = customerVisitMap.get(customerId);
+          const customer = customerMap.get(customerId);
+          return {
+            customer_id: customerId,
+            customer: customer || null,
+            last_visit_at: latestVisit?.visited_at || null,
+            total_visits: customerVisitCounts.get(customerId) || 0,
+            total_stamps: customerStampCounts.get(customerId) || 0
+          };
         })
-      );
+        .sort((a, b) => {
+          const aTime = a.last_visit_at ? new Date(a.last_visit_at).getTime() : 0;
+          const bTime = b.last_visit_at ? new Date(b.last_visit_at).getTime() : 0;
+          return bTime - aTime; // most recent first
+        });
 
       return res.status(200).json({
         success: true,
-        message: 'Verified visits retrieved successfully',
-        visits: result
+        message: 'Customer list retrieved successfully',
+        customers: result
       });
     } catch (error) {
       console.error(

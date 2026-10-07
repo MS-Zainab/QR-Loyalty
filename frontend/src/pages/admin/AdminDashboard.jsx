@@ -2,6 +2,12 @@ import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
 import { logClientError } from '../../services/logging';
+import { copyToClipboard } from '../../utils/clipboard';
+import { theme, cardStyle } from '../../theme';
+import StatCard from '../../components/StatCard';
+import StatusBadge from '../../components/StatusBadge';
+import SectionCard from '../../components/SectionCard';
+import './AdminDashboard.css';
 
 const AdminDashboard = () => {
   const { session, profile, logout } = useAuth();
@@ -19,17 +25,22 @@ const AdminDashboard = () => {
   // Tenant Onboarding state
   const [showAddTenantModal, setShowAddTenantModal] = useState(false);
   const [businessName, setBusinessName] = useState('');
+  const [customSlug, setCustomSlug] = useState('');
   const [ownerFullName, setOwnerFullName] = useState('');
   const [ownerEmail, setOwnerEmail] = useState('');
   const [ownerPassword, setOwnerPassword] = useState('');
   const [onboardLoading, setOnboardLoading] = useState(false);
   const [onboardSuccess, setOnboardSuccess] = useState('');
+  const [createdBrandedUrl, setCreatedBrandedUrl] = useState('');
+  const [copySuccess, setCopySuccess] = useState(false);
 
   // Admin Monthly Tenant Report State
   const [selectedReportTenantId, setSelectedReportTenantId] = useState('');
   const [selectedReportMonth, setSelectedReportMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [monthlyReportData, setMonthlyReportData] = useState(null);
   const [reportLoading, setReportLoading] = useState(false);
+  const [reportDownloadFormat, setReportDownloadFormat] = useState('csv');
+  const [reportDownloading, setReportDownloading] = useState(false);
 
   // Subscriptions state
   const [subscriptions, setSubscriptions] = useState([]);
@@ -42,6 +53,14 @@ const AdminDashboard = () => {
   const [grantPlanDuration, setGrantPlanDuration] = useState('monthly');
   const [grantLoading, setGrantLoading] = useState(false);
   const [grantSuccess, setGrantSuccess] = useState('');
+
+  // Slug Edit State
+  const [showSlugModal, setShowSlugModal] = useState(false);
+  const [slugTenantId, setSlugTenantId] = useState('');
+  const [slugTenantName, setSlugTenantName] = useState('');
+  const [slugInput, setSlugInput] = useState('');
+  const [slugSaving, setSlugSaving] = useState(false);
+  const [slugError, setSlugError] = useState('');
 
   const getConfig = (signal) => ({
     headers: {
@@ -214,13 +233,38 @@ const AdminDashboard = () => {
       setOnboardLoading(true);
       const config = getConfig();
 
+      // Validate custom slug if provided
+      let payload = { business_name: businessName.trim() };
+      if (customSlug && customSlug.trim()) {
+        const trimmedSlug = customSlug.trim();
+
+        // Client-side validation
+        if (!/^[a-z0-9-]{2,60}$/.test(trimmedSlug)) {
+          setError('Slug must be 2-60 characters with lowercase letters, digits, and hyphens only.');
+          setOnboardLoading(false);
+          return;
+        }
+        if (trimmedSlug.startsWith('-') || trimmedSlug.endsWith('-')) {
+          setError('Slug cannot start or end with a hyphen.');
+          setOnboardLoading(false);
+          return;
+        }
+
+        payload.slug = trimmedSlug;
+      }
+
       // Step 1: Create Tenant
-      const tenantRes = await api.post('/tenants', { business_name: businessName.trim() }, config);
+      const tenantRes = await api.post('/tenants', payload, config);
       const createdTenant = tenantRes.data?.tenant;
+      const generatedSlug = tenantRes.data?.slug || createdTenant?.slug;
 
       if (!createdTenant?.id) {
         throw new Error('Failed to create tenant record.');
       }
+
+      // Build branded URL using current origin (works for localhost and production)
+      const brandedUrl = generatedSlug ? `${window.location.origin}/v/${generatedSlug}` : '';
+      setCreatedBrandedUrl(brandedUrl);
 
       // Step 2: Create Vendor Owner
       await api.post(`/tenants/${createdTenant.id}/owner`, {
@@ -231,6 +275,7 @@ const AdminDashboard = () => {
 
       setOnboardSuccess(`Tenant "${businessName}" & owner "${ownerFullName}" onboarded successfully!`);
       setBusinessName('');
+      setCustomSlug('');
       setOwnerFullName('');
       setOwnerEmail('');
       setOwnerPassword('');
@@ -280,6 +325,53 @@ const AdminDashboard = () => {
     }
   };
 
+  const openSlugModal = (tenant) => {
+    setSlugTenantId(tenant.id);
+    setSlugTenantName(tenant.business_name);
+    setSlugInput(tenant.slug || '');
+    setSlugError('');
+    setShowSlugModal(true);
+  };
+
+  const handleSaveSlug = async (e) => {
+    if (e) e.preventDefault();
+    setSlugError('');
+
+    if (!slugInput.trim()) {
+      setSlugError('Slug cannot be empty.');
+      return;
+    }
+
+    const trimmedSlug = slugInput.trim();
+
+    // Validate format
+    if (!/^[a-z0-9-]{2,60}$/.test(trimmedSlug)) {
+      setSlugError('Slug must be 2-60 characters, containing only lowercase letters, digits, and hyphens.');
+      return;
+    }
+
+    if (trimmedSlug.startsWith('-') || trimmedSlug.endsWith('-')) {
+      setSlugError('Slug cannot start or end with a hyphen.');
+      return;
+    }
+
+    try {
+      setSlugSaving(true);
+      await api.patch(`/tenants/${slugTenantId}/slug`, { slug: trimmedSlug }, getConfig());
+      setShowSlugModal(false);
+      await loadDashboard();
+    } catch (err) {
+      logClientError('Update tenant slug failed', err);
+      setSlugError(
+        err?.response?.data?.message ||
+        err?.response?.data?.error ||
+        'Failed to update tenant slug.'
+      );
+    } finally {
+      setSlugSaving(false);
+    }
+  };
+
   const handleGenerateMonthlyReport = async (e) => {
     if (e) e.preventDefault();
     if (!selectedReportTenantId) {
@@ -304,6 +396,61 @@ const AdminDashboard = () => {
       );
     } finally {
       setReportLoading(false);
+    }
+  };
+
+  const handleDownloadMonthlyReport = async () => {
+    if (reportDownloading) return;
+    if (!selectedReportTenantId) {
+      setError('Please select a tenant to download the monthly report.');
+      return;
+    }
+    if (!selectedReportMonth) {
+      setError('Please select a month for the report.');
+      return;
+    }
+
+    try {
+      setReportDownloading(true);
+      setError('');
+      const res = await api.get(
+        `/admin/reports/monthly?tenant_id=${selectedReportTenantId}&month=${selectedReportMonth}&format=${reportDownloadFormat}`,
+        { ...getConfig(), responseType: 'blob' }
+      );
+
+      const blob = new Blob([res.data], {
+        type: reportDownloadFormat === 'pdf' ? 'application/pdf' : 'text/csv;charset=utf-8'
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `qr-loyalty-report-${selectedReportMonth}.${reportDownloadFormat}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      logClientError('Failed to download monthly report', err);
+
+      let backendMessage = '';
+      try {
+        if (err?.response?.data instanceof Blob && typeof err.response.data.text === 'function') {
+          const parsed = JSON.parse(await err.response.data.text());
+          backendMessage = parsed?.message || parsed?.error || '';
+        } else if (err?.response?.data && typeof err.response.data === 'object') {
+          backendMessage = err.response.data.message || err.response.data.error || '';
+        }
+      } catch {
+        backendMessage = '';
+      }
+
+      setError(
+        backendMessage && err?.response?.status && err.response.status < 500
+          ? backendMessage
+          : 'Unable to download the report. Please try again.'
+      );
+    } finally {
+      setReportDownloading(false);
     }
   };
 
@@ -500,42 +647,15 @@ const AdminDashboard = () => {
     ];
 
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        backgroundColor: '#f5f7fb',
-        fontFamily: 'Arial, sans-serif'
-      }}
-    >
+    <div className="admin-dashboard">
       {/* Header */}
-      <header
-        style={{
-          backgroundColor: '#ffffff',
-          borderBottom: '1px solid #e5e7eb',
-          padding: '20px 30px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: '20px',
-          flexWrap: 'wrap'
-        }}
-      >
+      <header className="admin-header">
         <div>
-          <h1
-            style={{
-              margin: 0,
-              fontSize: '28px'
-            }}
-          >
+          <h1 className="admin-title">
             Admin Dashboard
           </h1>
 
-          <p
-            style={{
-              margin: '6px 0 0',
-              color: '#6b7280'
-            }}
-          >
+          <p className="admin-subtitle">
             Welcome,{' '}
             {profile?.full_name ||
               profile?.name ||
@@ -545,31 +665,14 @@ const AdminDashboard = () => {
 
         <button
           onClick={handleLogout}
-          style={{
-            padding: '10px 18px',
-            border: 'none',
-            borderRadius: '8px',
-            backgroundColor: '#dc2626',
-            color: '#ffffff',
-            cursor: 'pointer',
-            fontWeight: '600'
-          }}
+          className="btn-danger"
         >
           Logout
         </button>
       </header>
 
       {/* Navigation */}
-      <nav
-        style={{
-          backgroundColor: '#ffffff',
-          borderBottom: '1px solid #e5e7eb',
-          padding: '0 30px',
-          display: 'flex',
-          gap: '10px',
-          flexWrap: 'wrap'
-        }}
-      >
+      <nav className="admin-nav">
         {[
           ['overview', 'Overview'],
           ['vendors', 'Vendors'],
@@ -578,27 +681,10 @@ const AdminDashboard = () => {
         ].map(([key, label]) => (
           <button
             key={key}
+            className={`nav-tab ${activeSection === key ? 'active' : ''}`}
             onClick={() =>
               setActiveSection(key)
             }
-            style={{
-              padding: '14px 18px',
-              border: 'none',
-              borderBottom:
-                activeSection === key
-                  ? '3px solid #2563eb'
-                  : '3px solid transparent',
-              backgroundColor: 'transparent',
-              color:
-                activeSection === key
-                  ? '#2563eb'
-                  : '#4b5563',
-              cursor: 'pointer',
-              fontWeight:
-                activeSection === key
-                  ? '600'
-                  : '500'
-            }}
           >
             {label}
           </button>
@@ -631,137 +717,71 @@ const AdminDashboard = () => {
 
         {/* OVERVIEW */}
         {activeSection === 'overview' && (
-          <section>
-            <h2>Platform Overview</h2>
+          <section className="admin-section">
+            <h2 className="section-title">Platform Overview</h2>
 
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns:
-                  'repeat(auto-fit, minmax(180px, 1fr))',
-                gap: '18px',
-                marginTop: '20px'
-              }}
-            >
-              {[
-                [
-                  'Total Vendors',
-                  totalVendors
-                ],
-                [
-                  'Active Vendors',
-                  activeVendors
-                ],
-                [
-                  'Vendors on Hold',
-                  holdVendors
-                ],
-                [
-                  'Removed Vendors',
-                  removedVendors
-                ],
-                [
-                  'Total Customers',
-                  totalCustomers
-                ],
-                [
-                  'Total Stamps',
-                  totalStamps
-                ],
-                [
-                  'Total Rewards',
-                  totalRewards
-                ],
-                [
-                  'Total Redemptions',
-                  totalRedemptions
-                ]
-              ].map(([label, value]) => (
-                <div
-                  key={label}
-                  style={{
-                    backgroundColor: '#ffffff',
-                    padding: '20px',
-                    borderRadius: '12px',
-                    border: '1px solid #e5e7eb',
-                    boxShadow:
-                      '0 2px 6px rgba(0,0,0,0.04)'
-                  }}
-                >
-                  <p
-                    style={{
-                      margin: 0,
-                      color: '#6b7280',
-                      fontSize: '14px'
-                    }}
-                  >
-                    {label}
-                  </p>
-
-                  <h3
-                    style={{
-                      margin: '10px 0 0',
-                      fontSize: '28px'
-                    }}
-                  >
-                    {String(value)}
-                  </h3>
-                </div>
-              ))}
+            <div className="stats-grid">
+              <StatCard
+                title="Total Vendors"
+                value={totalVendors}
+                icon="🏪"
+                color="primary"
+              />
+              <StatCard
+                title="Active Vendors"
+                value={activeVendors}
+                icon="✓"
+                color="success"
+              />
+              <StatCard
+                title="Vendors on Hold"
+                value={holdVendors}
+                icon="⏸"
+                color="warning"
+              />
+              <StatCard
+                title="Removed Vendors"
+                value={removedVendors}
+                icon="✕"
+                color="error"
+              />
+              <StatCard
+                title="Total Customers"
+                value={totalCustomers}
+                icon="👥"
+                color="primary"
+              />
+              <StatCard
+                title="Total Stamps"
+                value={totalStamps}
+                icon="⭐"
+                color="reward"
+              />
+              <StatCard
+                title="Total Rewards"
+                value={totalRewards}
+                icon="🎁"
+                color="reward"
+              />
+              <StatCard
+                title="Total Redemptions"
+                value={totalRedemptions}
+                icon="✓"
+                color="success"
+              />
             </div>
 
-            <div
-              style={{
-                backgroundColor: '#ffffff',
-                marginTop: '30px',
-                padding: '20px',
-                borderRadius: '12px',
-                border: '1px solid #e5e7eb'
-              }}
-            >
-              <h3>
-                Vendor Status Summary
-              </h3>
-
+            <SectionCard title="Vendor Status Summary">
               {Array.isArray(
                 vendorStatusSummary
               ) &&
               vendorStatusSummary.length > 0 ? (
-                <div
-                  style={{
-                    overflowX: 'auto'
-                  }}
-                >
-                  <table
-                    style={{
-                      width: '100%',
-                      borderCollapse:
-                        'collapse'
-                    }}
-                  >
+                <div className="table-wrapper">
+                  <table className="admin-table">
                     <thead>
                       <tr>
-                        <th
-                          style={{
-                            textAlign: 'left',
-                            padding: '12px',
-                            borderBottom:
-                              '1px solid #e5e7eb'
-                          }}
-                        >
-                          Status
-                        </th>
-
-                        <th
-                          style={{
-                            textAlign: 'left',
-                            padding: '12px',
-                            borderBottom:
-                              '1px solid #e5e7eb'
-                          }}
-                        >
-                          Count
-                        </th>
+                        <th>Status</th>
+                        <th>Count</th>
                       </tr>
                     </thead>
 
@@ -791,27 +811,11 @@ const AdminDashboard = () => {
                                 `${status}-${index}`
                               }
                             >
-                              <td
-                                style={{
-                                  padding:
-                                    '12px',
-                                  borderBottom:
-                                    '1px solid #f1f5f9'
-                                }}
-                              >
-                                {String(
-                                  status
-                                )}
+                              <td>
+                                <StatusBadge status={String(status)} />
                               </td>
 
-                              <td
-                                style={{
-                                  padding:
-                                    '12px',
-                                  borderBottom:
-                                    '1px solid #f1f5f9'
-                                }}
-                              >
+                              <td>
                                 {String(
                                   count
                                 )}
@@ -824,64 +828,35 @@ const AdminDashboard = () => {
                   </table>
                 </div>
               ) : (
-                <p
-                  style={{
-                    color: '#6b7280'
-                  }}
-                >
+                <p className="empty-state-text">
                   No vendor status data available.
                 </p>
               )}
-            </div>
+            </SectionCard>
           </section>
         )}
 
         {/* VENDORS */}
         {activeSection === 'vendors' && (
-          <section>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent:
-                  'space-between',
-                alignItems: 'center',
-                gap: '15px',
-                flexWrap: 'wrap'
-              }}
-            >
-              <h2>Vendors</h2>
+          <section className="admin-section">
+            <div className="section-header">
+              <h2 className="section-title">Vendors</h2>
 
-              <div style={{ display: 'flex', gap: '10px' }}>
+              <div className="button-group">
                 <button
                   onClick={() => {
                     setError('');
                     setOnboardSuccess('');
                     setShowAddTenantModal(true);
                   }}
-                  style={{
-                    padding: '10px 16px',
-                    border: 'none',
-                    borderRadius: '8px',
-                    backgroundColor: '#16a34a',
-                    color: '#ffffff',
-                    cursor: 'pointer',
-                    fontWeight: '600'
-                  }}
+                  className="btn-primary"
                 >
                   + Add New Tenant
                 </button>
 
                 <button
                   onClick={loadDashboard}
-                  style={{
-                    padding: '10px 16px',
-                    border: '1px solid #d1d5db',
-                    borderRadius: '8px',
-                    backgroundColor: '#ffffff',
-                    color: '#374151',
-                    cursor: 'pointer',
-                    fontWeight: '500'
-                  }}
+                  className="btn-secondary"
                 >
                   Refresh
                 </button>
@@ -889,100 +864,53 @@ const AdminDashboard = () => {
             </div>
 
             {onboardSuccess && (
-              <div
-                style={{
-                  marginTop: '16px',
-                  padding: '14px 16px',
-                  borderRadius: '8px',
-                  backgroundColor: '#dcfce7',
-                  color: '#166534',
-                  border: '1px solid #bbf7d0'
-                }}
-              >
+              <div className="success-message">
                 {onboardSuccess}
               </div>
             )}
 
-            <div
-              style={{
-                marginTop: '20px',
-                backgroundColor:
-                  '#ffffff',
-                borderRadius: '12px',
-                border: '1px solid #e5e7eb',
-                overflowX: 'auto'
-              }}
-            >
+            {createdBrandedUrl && (
+              <div className="branded-url-box">
+                <div className="branded-url-label">
+                  Branded Customer URL:
+                </div>
+                <div className="branded-url-content">
+                  <code className="branded-url-code">
+                    {createdBrandedUrl}
+                  </code>
+                  <button
+                    onClick={async () => {
+                      const success = await copyToClipboard(createdBrandedUrl);
+                      if (success) {
+                        setCopySuccess(true);
+                        setTimeout(() => setCopySuccess(false), 2000);
+                      }
+                    }}
+                    className={`btn-small ${copySuccess ? 'btn-success' : 'btn-primary'}`}
+                  >
+                    {copySuccess ? 'Copied!' : 'Copy URL'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="table-container">
               {vendors.length > 0 ? (
-                <table
-                  style={{
-                    width: '100%',
-                    borderCollapse:
-                      'collapse',
-                    minWidth: '700px'
-                  }}
-                >
+                <table className="admin-table">
                   <thead>
                     <tr>
-                      <th
-                        style={{
-                          textAlign: 'left',
-                          padding: '14px',
-                          borderBottom:
-                            '1px solid #e5e7eb'
-                        }}
-                      >
-                        Business Name
-                      </th>
-
-                      <th
-                        style={{
-                          textAlign: 'left',
-                          padding: '14px',
-                          borderBottom:
-                            '1px solid #e5e7eb'
-                        }}
-                      >
-                        Status
-                      </th>
-
-                      <th
-                        style={{
-                          textAlign: 'left',
-                          padding: '14px',
-                          borderBottom:
-                            '1px solid #e5e7eb'
-                        }}
-                      >
-                        Created
-                      </th>
-
-                      <th
-                        style={{
-                          textAlign: 'left',
-                          padding: '14px',
-                          borderBottom:
-                            '1px solid #e5e7eb'
-                        }}
-                      >
-                        Actions
-                      </th>
+                      <th>Business Name</th>
+                      <th>Status</th>
+                      <th>Slug</th>
+                      <th>Branded URL</th>
+                      <th>Created</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
 
                   <tbody>
                     {vendors.map(
                       (vendor, index) => {
-                        /*
-                         * IMPORTANT:
-                         * Never render {vendor}
-                         * directly.
-                         *
-                         * Vendor is an object.
-                         * We render its individual
-                         * properties instead.
-                         */
-
                         const vendorId =
                           vendor?.id;
 
@@ -1008,94 +936,51 @@ const AdminDashboard = () => {
                               `vendor-${index}`
                             }
                           >
-                            <td
-                              style={{
-                                padding: '14px',
-                                borderBottom:
-                                  '1px solid #f1f5f9',
-                                fontWeight:
-                                  '600'
-                              }}
-                            >
+                            <td className="vendor-name-cell">
                               {String(
                                 businessName
                               )}
                             </td>
 
-                            <td
-                              style={{
-                                padding: '14px',
-                                borderBottom:
-                                  '1px solid #f1f5f9'
-                              }}
-                            >
-                              <span
-                                style={{
-                                  display:
-                                    'inline-block',
-                                  padding:
-                                    '5px 10px',
-                                  borderRadius:
-                                    '999px',
-                                  backgroundColor:
-                                    status ===
-                                    'active'
-                                      ? '#dcfce7'
-                                      : status ===
-                                        'hold'
-                                      ? '#fef3c7'
-                                      : status ===
-                                        'removed'
-                                      ? '#fee2e2'
-                                      : '#f3f4f6',
-                                  color:
-                                    status ===
-                                    'active'
-                                      ? '#166534'
-                                      : status ===
-                                        'hold'
-                                      ? '#92400e'
-                                      : status ===
-                                        'removed'
-                                      ? '#991b1b'
-                                      : '#374151'
-                                }}
-                              >
-                                {String(
-                                  status
-                                )}
-                              </span>
+                            <td>
+                              <StatusBadge status={String(status)} />
                             </td>
 
-                            <td
-                              style={{
-                                padding: '14px',
-                                borderBottom:
-                                  '1px solid #f1f5f9'
-                              }}
-                            >
+                            <td className="slug-cell">
+                              {vendor?.slug || '—'}
+                            </td>
+
+                            <td className="branded-url-cell">
+                              {vendor?.slug ? (
+                                <div className="url-copy-row">
+                                  <code className="url-code">
+                                    {window.location.origin}/v/{vendor.slug}
+                                  </code>
+                                  <button
+                                    onClick={async () => {
+                                      const url = `${window.location.origin}/v/${vendor.slug}`;
+                                      await copyToClipboard(url);
+                                    }}
+                                    className="btn-icon"
+                                    title="Copy URL"
+                                  >
+                                    Copy
+                                  </button>
+                                </div>
+                              ) : (
+                                <span className="no-slug">No slug set</span>
+                              )}
+                            </td>
+
+                            <td>
                               {formatDate(
                                 createdAt
                               )}
                             </td>
 
-                            <td
-                              style={{
-                                padding: '14px',
-                                borderBottom:
-                                  '1px solid #f1f5f9'
-                              }}
-                            >
+                            <td>
                               {vendorId ? (
-                                <div
-                                  style={{
-                                    display:
-                                      'flex',
-                                    gap: '8px',
-                                    flexWrap:
-                                      'wrap'
-                                  }}
-                                >
+                                <div className="action-buttons">
                                   {status !==
                                     'active' && (
                                     <button
@@ -1105,20 +990,7 @@ const AdminDashboard = () => {
                                           'active'
                                         )
                                       }
-                                      style={{
-                                        padding:
-                                          '7px 12px',
-                                        border:
-                                          'none',
-                                        borderRadius:
-                                          '6px',
-                                        backgroundColor:
-                                          '#16a34a',
-                                        color:
-                                          '#ffffff',
-                                        cursor:
-                                          'pointer'
-                                      }}
+                                      className="btn-activate"
                                     >
                                       Activate
                                     </button>
@@ -1133,20 +1005,7 @@ const AdminDashboard = () => {
                                           'hold'
                                         )
                                       }
-                                      style={{
-                                        padding:
-                                          '7px 12px',
-                                        border:
-                                          'none',
-                                        borderRadius:
-                                          '6px',
-                                        backgroundColor:
-                                          '#d97706',
-                                        color:
-                                          '#ffffff',
-                                        cursor:
-                                          'pointer'
-                                      }}
+                                      className="btn-hold"
                                     >
                                       Hold
                                     </button>
@@ -1161,24 +1020,18 @@ const AdminDashboard = () => {
                                           'removed'
                                         )
                                       }
-                                      style={{
-                                        padding:
-                                          '7px 12px',
-                                        border:
-                                          'none',
-                                        borderRadius:
-                                          '6px',
-                                        backgroundColor:
-                                          '#dc2626',
-                                        color:
-                                          '#ffffff',
-                                        cursor:
-                                          'pointer'
-                                      }}
+                                      className="btn-remove"
                                     >
                                       Remove
                                     </button>
                                   )}
+
+                                  <button
+                                    onClick={() => openSlugModal(vendor)}
+                                    className="btn-slug"
+                                  >
+                                    {vendor?.slug ? 'Edit Slug' : 'Set Slug'}
+                                  </button>
                                 </div>
                               ) : (
                                 '-'
@@ -1191,112 +1044,116 @@ const AdminDashboard = () => {
                   </tbody>
                 </table>
               ) : (
-                <div
-                  style={{
-                    padding: '30px',
-                    textAlign: 'center',
-                    color: '#6b7280'
-                  }}
-                >
+                <div className="empty-state">
                   No vendors found.
                 </div>
               )}
             </div>
             {/* Tenant Onboarding Modal */}
             {showAddTenantModal && (
-              <div
-                style={{
-                  position: 'fixed',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  backgroundColor: 'rgba(0,0,0,0.5)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  padding: '20px',
-                  zIndex: 1000
-                }}
-              >
-                <div
-                  style={{
-                    backgroundColor: '#ffffff',
-                    borderRadius: '16px',
-                    padding: '28px',
-                    maxWidth: '480px',
-                    width: '100%',
-                    boxSizing: 'border-box'
-                  }}
-                >
-                  <h3 style={{ margin: '0 0 6px', fontSize: '20px', fontWeight: '700', color: '#111827' }}>
+              <div className="modal-overlay">
+                <div className="modal-content">
+                  <h3 className="modal-title">
                     Onboard New Vendor Tenant
                   </h3>
-                  <p style={{ margin: '0 0 20px', fontSize: '14px', color: '#6b7280', lineHeight: 1.5 }}>
+                  <p className="modal-subtitle">
                     Create a new business tenant and configure its vendor owner credentials.
                   </p>
 
-                  <form onSubmit={handleAddTenant} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Business Name</label>
+                  <form onSubmit={handleAddTenant} className="modal-form">
+                    <div className="form-group">
+                      <label className="form-label">Business Name</label>
                       <input
                         type="text"
                         value={businessName}
-                        onChange={(e) => setBusinessName(e.target.value)}
+                        onChange={(e) => {
+                          setBusinessName(e.target.value);
+                          // Auto-generate slug preview if custom slug is empty
+                          if (!customSlug.trim()) {
+                            const autoSlug = e.target.value
+                              .toLowerCase()
+                              .trim()
+                              .replace(/[^a-z0-9]+/g, '-')
+                              .replace(/^-|-$/g, '')
+                              .slice(0, 60);
+                            setCustomSlug(autoSlug);
+                          }
+                        }}
                         placeholder="e.g. Express Coffee Bar"
                         required
-                        style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                        className="form-input"
                       />
                     </div>
 
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Owner Full Name</label>
+                    <div className="form-group">
+                      <label className="form-label">
+                        Branded Slug (optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={customSlug}
+                        onChange={(e) => setCustomSlug(e.target.value)}
+                        placeholder="e.g., express-coffee-bar"
+                        className="form-input monospace"
+                      />
+                      {customSlug && (
+                        <p className="form-hint">
+                          Preview: <code className="url-preview">{window.location.origin}/v/{customSlug}</code>
+                        </p>
+                      )}
+                      <p className="form-help">
+                        Lowercase letters, digits, hyphens only • 2-60 characters • leave empty to auto-generate
+                      </p>
+                    </div>
+
+                    <div className="form-group">
+                      <label className="form-label">Owner Full Name</label>
                       <input
                         type="text"
                         value={ownerFullName}
                         onChange={(e) => setOwnerFullName(e.target.value)}
                         placeholder="e.g. Alex Rivera"
                         required
-                        style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                        className="form-input"
                       />
                     </div>
 
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Owner Email Address</label>
+                    <div className="form-group">
+                      <label className="form-label">Owner Email Address</label>
                       <input
                         type="email"
                         value={ownerEmail}
                         onChange={(e) => setOwnerEmail(e.target.value)}
                         placeholder="owner@expresscoffee.com"
                         required
-                        style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                        className="form-input"
                       />
                     </div>
 
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Initial Owner Password</label>
+                    <div className="form-group">
+                      <label className="form-label">Initial Owner Password</label>
                       <input
                         type="password"
                         value={ownerPassword}
                         onChange={(e) => setOwnerPassword(e.target.value)}
                         placeholder="At least 6 characters"
                         required
-                        style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                        className="form-input"
                       />
                     </div>
 
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
+                    <div className="modal-actions">
                       <button
                         type="button"
                         onClick={() => setShowAddTenantModal(false)}
-                        style={{ padding: '10px 16px', border: '1px solid #d1d5db', backgroundColor: '#ffffff', color: '#374151', borderRadius: '8px', cursor: 'pointer', fontWeight: '500' }}
+                        className="btn-secondary"
                       >
                         Cancel
                       </button>
                       <button
                         type="submit"
                         disabled={onboardLoading}
-                        style={{ padding: '10px 16px', border: 'none', backgroundColor: '#16a34a', color: '#ffffff', borderRadius: '8px', cursor: 'pointer', fontWeight: '600' }}
+                        className="btn-primary"
                       >
                         {onboardLoading ? 'Creating...' : 'Onboard Tenant'}
                       </button>
@@ -1310,62 +1167,33 @@ const AdminDashboard = () => {
 
         {/* REPORTS */}
         {activeSection === 'reports' && (
-          <section>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: '15px',
-                flexWrap: 'wrap'
-              }}
-            >
+          <section className="admin-section">
+            <div className="section-header">
               <div>
-                <h2 style={{ margin: 0 }}>Reports</h2>
-                <p style={{ margin: '4px 0 0', color: '#6b7280', fontSize: '14px' }}>
+                <h2 className="section-title">Reports</h2>
+                <p className="section-subtitle">
                   Platform Admin Official Monthly Tenant Report Generator
                 </p>
               </div>
 
               <button
                 onClick={downloadReports}
-                style={{
-                  padding: '10px 16px',
-                  border: '1px solid #2563eb',
-                  borderRadius: '8px',
-                  backgroundColor: '#ffffff',
-                  color: '#2563eb',
-                  cursor: 'pointer',
-                  fontWeight: '600'
-                }}
+                className="btn-secondary"
               >
                 Export Platform CSV
               </button>
             </div>
 
             {/* Monthly Tenant Report Generator Form */}
-            <div
-              style={{
-                marginTop: '20px',
-                backgroundColor: '#ffffff',
-                padding: '24px',
-                borderRadius: '12px',
-                border: '1px solid #e5e7eb',
-                boxShadow: '0 2px 4px rgba(0,0,0,0.02)'
-              }}
-            >
-              <h3 style={{ margin: '0 0 16px', fontSize: '18px', fontWeight: '700', color: '#111827' }}>
-                Generate Tenant Monthly Report
-              </h3>
-
-              <form onSubmit={handleGenerateMonthlyReport} style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: '220px', flex: 1 }}>
-                  <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Select Tenant</label>
+            <SectionCard title="Generate Tenant Monthly Report">
+              <form onSubmit={handleGenerateMonthlyReport} className="inline-form">
+                <div className="form-group-inline">
+                  <label className="form-label">Select Tenant</label>
                   <select
                     value={selectedReportTenantId}
                     onChange={(e) => setSelectedReportTenantId(e.target.value)}
                     required
-                    style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                    className="form-input"
                   >
                     <option value="">-- Choose Vendor Tenant --</option>
                     {vendors.map((v) => (
@@ -1376,86 +1204,71 @@ const AdminDashboard = () => {
                   </select>
                 </div>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: '180px' }}>
-                  <label style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>Select Month</label>
+                <div className="form-group-inline">
+                  <label className="form-label">Select Month</label>
                   <input
                     type="month"
                     value={selectedReportMonth}
                     onChange={(e) => setSelectedReportMonth(e.target.value)}
                     required
-                    style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '14px', width: '100%', boxSizing: 'border-box' }}
+                    className="form-input"
                   />
+                </div>
+
+                <div className="form-group-inline">
+                  <label className="form-label">Download Format</label>
+                  <select
+                    value={reportDownloadFormat}
+                    onChange={(e) => setReportDownloadFormat(e.target.value)}
+                    className="form-input"
+                  >
+                    <option value="csv">CSV</option>
+                    <option value="pdf">PDF</option>
+                  </select>
                 </div>
 
                 <button
                   type="submit"
                   disabled={reportLoading || !selectedReportTenantId}
-                  style={{
-                    padding: '11px 22px',
-                    border: 'none',
-                    borderRadius: '8px',
-                    backgroundColor: reportLoading || !selectedReportTenantId ? '#9ca3af' : '#2563eb',
-                    color: '#ffffff',
-                    cursor: reportLoading || !selectedReportTenantId ? 'not-allowed' : 'pointer',
-                    fontWeight: '600',
-                    fontSize: '14px',
-                    height: '42px'
-                  }}
+                  className="btn-primary"
                 >
                   {reportLoading ? 'Generating...' : 'Generate Report'}
                 </button>
+
+                <button
+                  type="button"
+                  onClick={handleDownloadMonthlyReport}
+                  disabled={reportDownloading || !selectedReportTenantId || !selectedReportMonth}
+                  className="btn-success"
+                >
+                  {reportDownloading ? 'Downloading...' : 'Download Report'}
+                </button>
               </form>
-            </div>
+            </SectionCard>
 
             {/* Generated Monthly Report Preview */}
             {monthlyReportData && (
-              <div
-                style={{
-                  marginTop: '24px',
-                  backgroundColor: '#ffffff',
-                  padding: '24px',
-                  borderRadius: '12px',
-                  border: '1px solid #2563eb'
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '15px', marginBottom: '20px' }}>
+              <SectionCard>
+                <div className="report-header">
                   <div>
-                    <h3 style={{ margin: 0, fontSize: '20px', color: '#1e3a8a' }}>
+                    <h3 className="report-title">
                       {monthlyReportData.business_name} — Monthly Report ({monthlyReportData.report_month})
                     </h3>
-                    <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#6b7280' }}>
+                    <p className="report-subtitle">
                       Official Tenant Analytics & Activity Summary
                     </p>
                   </div>
 
                   <button
                     onClick={downloadMonthlyReportCsv}
-                    style={{
-                      padding: '10px 18px',
-                      border: 'none',
-                      borderRadius: '8px',
-                      backgroundColor: '#16a34a',
-                      color: '#ffffff',
-                      cursor: 'pointer',
-                      fontWeight: '600',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px'
-                    }}
+                    className="btn-success"
                   >
                     <span>↓</span> Download CSV
                   </button>
                 </div>
 
                 {/* Report Key Metrics Grid */}
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
-                    gap: '16px',
-                    marginBottom: '28px'
-                  }}
-                >
+                <div className="stats-grid">
                   {[
                     ['Total Visits', monthlyReportData.summary?.total_visits ?? 0],
                     ['Unique Customers', monthlyReportData.summary?.unique_customers ?? 0],
@@ -1467,34 +1280,34 @@ const AdminDashboard = () => {
                     ['Peak Visit Day', `${monthlyReportData.summary?.peak_visit_day?.date} (${monthlyReportData.summary?.peak_visit_day?.visits || 0})`],
                     ['Lowest Visit Day', `${monthlyReportData.summary?.lowest_visit_day?.date} (${monthlyReportData.summary?.lowest_visit_day?.visits || 0})`]
                   ].map(([label, val]) => (
-                    <div key={label} style={{ backgroundColor: '#f8fafc', padding: '16px', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
-                      <span style={{ fontSize: '12px', color: '#64748b', textTransform: 'uppercase', fontWeight: '600' }}>{label}</span>
-                      <h4 style={{ margin: '8px 0 0', fontSize: '20px', color: '#0f172a' }}>{String(val)}</h4>
+                    <div key={label} className="metric-card">
+                      <span className="metric-label">{label}</span>
+                      <h4 className="metric-value">{String(val)}</h4>
                     </div>
                   ))}
                 </div>
 
                 {/* Daily Breakdown Table */}
-                <h4 style={{ margin: '0 0 12px', fontSize: '16px', fontWeight: '700' }}>Daily Visit Breakdown</h4>
-                <div style={{ overflowX: 'auto', marginBottom: '28px' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '600px' }}>
+                <h4 className="table-title">Daily Visit Breakdown</h4>
+                <div className="table-wrapper">
+                  <table className="admin-table">
                     <thead>
-                      <tr style={{ backgroundColor: '#f1f5f9' }}>
-                        <th style={{ padding: '10px 12px', textAlign: 'left', borderBottom: '2px solid #cbd5e1' }}>Date</th>
-                        <th style={{ padding: '10px 12px', textAlign: 'center', borderBottom: '2px solid #cbd5e1' }}>Visits</th>
-                        <th style={{ padding: '10px 12px', textAlign: 'center', borderBottom: '2px solid #cbd5e1' }}>Unique Customers</th>
-                        <th style={{ padding: '10px 12px', textAlign: 'center', borderBottom: '2px solid #cbd5e1' }}>Stamps</th>
-                        <th style={{ padding: '10px 12px', textAlign: 'center', borderBottom: '2px solid #cbd5e1' }}>Redemptions</th>
+                      <tr>
+                        <th>Date</th>
+                        <th>Visits</th>
+                        <th>Unique Customers</th>
+                        <th>Stamps</th>
+                        <th>Redemptions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {(monthlyReportData.daily_breakdown || []).map((row) => (
-                        <tr key={row.date} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                          <td style={{ padding: '10px 12px', fontWeight: '500' }}>{row.date}</td>
-                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>{row.visits}</td>
-                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>{row.unique_customers}</td>
-                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>{row.stamps}</td>
-                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>{row.redemptions}</td>
+                        <tr key={row.date}>
+                          <td>{row.date}</td>
+                          <td className="text-center">{row.visits}</td>
+                          <td className="text-center">{row.unique_customers}</td>
+                          <td className="text-center">{row.stamps}</td>
+                          <td className="text-center">{row.redemptions}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1502,26 +1315,26 @@ const AdminDashboard = () => {
                 </div>
 
                 {/* Customer Visit Frequency */}
-                <h4 style={{ margin: '0 0 12px', fontSize: '16px', fontWeight: '700' }}>Customer Visit Frequency</h4>
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '450px' }}>
+                <h4 className="table-title">Customer Visit Frequency</h4>
+                <div className="table-wrapper">
+                  <table className="admin-table">
                     <thead>
-                      <tr style={{ backgroundColor: '#f1f5f9' }}>
-                        <th style={{ padding: '10px 12px', textAlign: 'left', borderBottom: '2px solid #cbd5e1' }}>Customer Identifier</th>
-                        <th style={{ padding: '10px 12px', textAlign: 'right', borderBottom: '2px solid #cbd5e1' }}>Visits in Period</th>
+                      <tr>
+                        <th>Customer Identifier</th>
+                        <th className="text-right">Visits in Period</th>
                       </tr>
                     </thead>
                     <tbody>
                       {(monthlyReportData.customer_frequency || []).length > 0 ? (
                         monthlyReportData.customer_frequency.map((item, idx) => (
-                          <tr key={idx} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                            <td style={{ padding: '10px 12px', fontWeight: '500' }}>{item.customer_identifier}</td>
-                            <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '700', color: '#2563eb' }}>{item.visits} visits</td>
+                          <tr key={idx}>
+                            <td>{item.customer_identifier}</td>
+                            <td className="text-right highlight">{item.visits} visits</td>
                           </tr>
                         ))
                       ) : (
                         <tr>
-                          <td colSpan={2} style={{ padding: '14px', color: '#6b7280', textAlign: 'center' }}>
+                          <td colSpan={2} className="empty-cell">
                             No customer visit activity recorded in this month.
                           </td>
                         </tr>
@@ -1529,371 +1342,223 @@ const AdminDashboard = () => {
                     </tbody>
                   </table>
                 </div>
-              </div>
+              </SectionCard>
             )}
 
             {/* Platform Overview Reports */}
-            <div
-              style={{
-                marginTop: '30px',
-                backgroundColor: '#ffffff',
-                borderRadius: '12px',
-                border: '1px solid #e5e7eb',
-                overflowX: 'auto',
-                padding: '20px'
-              }}
-            >
-              <h3 style={{ margin: '0 0 16px', fontSize: '18px' }}>Platform Vendors Summary</h3>
+            <SectionCard title="Platform Vendors Summary">
               {reports.length > 0 ? (
-                <table
-                  style={{
-                    width: '100%',
-                    borderCollapse:
-                      'collapse',
-                    minWidth: '700px'
-                  }}
-                >
-                  <thead>
-                    <tr>
-                      <th
-                        style={{
-                          textAlign: 'left',
-                          padding: '14px',
-                          borderBottom:
-                            '1px solid #e5e7eb'
-                        }}
-                      >
-                        Vendor
-                      </th>
+                <div className="table-wrapper">
+                  <table className="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Vendor</th>
+                        <th>Customers</th>
+                        <th>Stamps</th>
+                        <th>Rewards</th>
+                        <th>Redemptions</th>
+                      </tr>
+                    </thead>
 
-                      <th
-                        style={{
-                          textAlign: 'left',
-                          padding: '14px',
-                          borderBottom:
-                            '1px solid #e5e7eb'
-                        }}
-                      >
-                        Customers
-                      </th>
+                    <tbody>
+                      {reports.map(
+                        (report, index) => {
+                          const vendorName =
+                            report?.business_name ||
+                            report?.businessName ||
+                            report?.vendor_name ||
+                            report?.vendorName ||
+                            report?.vendor?.business_name ||
+                            'Unknown Vendor';
 
-                      <th
-                        style={{
-                          textAlign: 'left',
-                          padding: '14px',
-                          borderBottom:
-                            '1px solid #e5e7eb'
-                        }}
-                      >
-                        Stamps
-                      </th>
+                          const customers =
+                            report?.statistics?.total_customers ??
+                            report?.total_customers ??
+                            report?.customers ??
+                            0;
 
-                      <th
-                        style={{
-                          textAlign: 'left',
-                          padding: '14px',
-                          borderBottom:
-                            '1px solid #e5e7eb'
-                        }}
-                      >
-                        Rewards
-                      </th>
+                          const stamps =
+                            report?.statistics?.total_stamps ??
+                            report?.total_stamps ??
+                            report?.stamps ??
+                            0;
 
-                      <th
-                        style={{
-                          textAlign: 'left',
-                          padding: '14px',
-                          borderBottom:
-                            '1px solid #e5e7eb'
-                        }}
-                      >
-                        Redemptions
-                      </th>
-                    </tr>
-                  </thead>
+                          const rewards =
+                            report?.statistics?.total_rewards ??
+                            report?.total_rewards ??
+                            report?.rewards ??
+                            0;
 
-                  <tbody>
-                    {reports.map(
-                      (report, index) => {
-                        const vendorName =
-                          report?.business_name ||
-                          report?.businessName ||
-                          report?.vendor_name ||
-                          report?.vendorName ||
-                          report?.vendor?.business_name ||
-                          'Unknown Vendor';
+                          const redemptions =
+                            report?.statistics?.total_redemptions ??
+                            report?.total_redemptions ??
+                            report?.redemptions ??
+                            0;
 
-                        const customers =
-                          report?.statistics?.total_customers ??
-                          report?.total_customers ??
-                          report?.customers ??
-                          0;
-
-                        const stamps =
-                          report?.statistics?.total_stamps ??
-                          report?.total_stamps ??
-                          report?.stamps ??
-                          0;
-
-                        const rewards =
-                          report?.statistics?.total_rewards ??
-                          report?.total_rewards ??
-                          report?.rewards ??
-                          0;
-
-                        const redemptions =
-                          report?.statistics?.total_redemptions ??
-                          report?.total_redemptions ??
-                          report?.redemptions ??
-                          0;
-
-                        return (
-                          <tr
-                            key={
-                              report?.id ||
-                              `report-${index}`
-                            }
-                          >
-                            <td
-                              style={{
-                                padding: '14px',
-                                borderBottom:
-                                  '1px solid #f1f5f9'
-                              }}
+                          return (
+                            <tr
+                              key={
+                                report?.id ||
+                                `report-${index}`
+                              }
                             >
-                              {String(
-                                vendorName
-                              )}
-                            </td>
-
-                            <td
-                              style={{
-                                padding: '14px',
-                                borderBottom:
-                                  '1px solid #f1f5f9'
-                              }}
-                            >
-                              {String(
-                                customers
-                              )}
-                            </td>
-
-                            <td
-                              style={{
-                                padding: '14px',
-                                borderBottom:
-                                  '1px solid #f1f5f9'
-                              }}
-                            >
-                              {String(
-                                stamps
-                              )}
-                            </td>
-
-                            <td
-                              style={{
-                                padding: '14px',
-                                borderBottom:
-                                  '1px solid #f1f5f9'
-                              }}
-                            >
-                              {String(
-                                rewards
-                              )}
-                            </td>
-
-                            <td
-                              style={{
-                                padding: '14px',
-                                borderBottom:
-                                  '1px solid #f1f5f9'
-                              }}
-                            >
-                              {String(
-                                redemptions
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      }
-                    )}
-                  </tbody>
-                </table>
+                              <td>{String(vendorName)}</td>
+                              <td>{String(customers)}</td>
+                              <td>{String(stamps)}</td>
+                              <td>{String(rewards)}</td>
+                              <td>{String(redemptions)}</td>
+                            </tr>
+                          );
+                        }
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               ) : (
-                <div
-                  style={{
-                    padding: '30px',
-                    textAlign: 'center',
-                    color: '#6b7280'
-                  }}
-                >
+                <div className="empty-state">
                   No reports available.
                 </div>
               )}
-            </div>
+            </SectionCard>
           </section>
         )}
 
         {/* SUBSCRIPTIONS */}
         {activeSection === 'subscriptions' && (
-          <section>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+          <section className="admin-section">
+            <div className="section-header">
               <div>
-                <h2 style={{ margin: 0 }}>Tenant Subscriptions & Billing</h2>
-                <p style={{ margin: '4px 0 0', color: '#6b7280', fontSize: '14px' }}>
+                <h2 className="section-title">Tenant Subscriptions & Billing</h2>
+                <p className="section-subtitle">
                   Monitor paid subscriptions, active trial periods, and override tenant plans.
                 </p>
               </div>
             </div>
 
             {/* Stat Cards */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', marginBottom: '24px' }}>
-              <div style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '12px', border: '1px solid #e5e7eb', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
-                <div style={{ fontSize: '13px', color: '#64748b', fontWeight: '600' }}>ACTIVE PAID TENANTS</div>
-                <div style={{ fontSize: '28px', fontWeight: '800', color: '#166534', marginTop: '6px' }}>{subSummary?.total_paid_tenants ?? 0}</div>
-              </div>
-
-              <div style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '12px', border: '1px solid #e5e7eb', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
-                <div style={{ fontSize: '13px', color: '#64748b', fontWeight: '600' }}>ACTIVE TRIALS</div>
-                <div style={{ fontSize: '28px', fontWeight: '800', color: '#0369a1', marginTop: '6px' }}>{subSummary?.active_trials ?? 0}</div>
-              </div>
-
-              <div style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '12px', border: '1px solid #e5e7eb', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
-                <div style={{ fontSize: '13px', color: '#64748b', fontWeight: '600' }}>EXPIRED SUBSCRIPTIONS</div>
-                <div style={{ fontSize: '28px', fontWeight: '800', color: '#991b1b', marginTop: '6px' }}>{subSummary?.expired_subscriptions ?? 0}</div>
-              </div>
+            <div className="stats-grid">
+              <StatCard
+                title="ACTIVE PAID TENANTS"
+                value={subSummary?.total_paid_tenants ?? 0}
+                color="success"
+              />
+              <StatCard
+                title="ACTIVE TRIALS"
+                value={subSummary?.active_trials ?? 0}
+                color="primary"
+              />
+              <StatCard
+                title="EXPIRED SUBSCRIPTIONS"
+                value={subSummary?.expired_subscriptions ?? 0}
+                color="error"
+              />
             </div>
 
             {/* Tenant Subscriptions Table */}
-            <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', border: '1px solid #e5e7eb', overflow: 'hidden' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
-                <thead>
-                  <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', textAlign: 'left' }}>
-                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Business Name</th>
-                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Plan Type</th>
-                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Status</th>
-                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Days Remaining</th>
-                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Amount Paid</th>
-                    <th style={{ padding: '14px 16px', color: '#475569', fontWeight: '600' }}>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {subscriptions.length > 0 ? (
-                    subscriptions.map((sub) => (
-                      <tr key={sub.tenant_id} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                        <td style={{ padding: '14px 16px', fontWeight: '600', color: '#0f172a' }}>{sub.business_name}</td>
-                        <td style={{ padding: '14px 16px' }}>
-                          <span style={{ padding: '4px 10px', borderRadius: '12px', fontSize: '12px', fontWeight: '700', textTransform: 'uppercase', backgroundColor: '#e0f2fe', color: '#0369a1' }}>
-                            {sub.plan_type}
-                          </span>
-                        </td>
-                        <td style={{ padding: '14px 16px' }}>
-                          <span style={{ padding: '4px 10px', borderRadius: '12px', fontSize: '12px', fontWeight: '700', textTransform: 'uppercase', backgroundColor: sub.status === 'active' ? '#dcfce7' : '#fee2e2', color: sub.status === 'active' ? '#15803d' : '#b91c1c' }}>
-                            {sub.status}
-                          </span>
-                        </td>
-                        <td style={{ padding: '14px 16px', fontWeight: '600' }}>{sub.days_left} Days</td>
-                        <td style={{ padding: '14px 16px', fontWeight: '600' }}>${sub.amount_paid}.00</td>
-                        <td style={{ padding: '14px 16px' }}>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              try {
-                                await api.patch(`/admin/subscriptions/${sub.tenant_id}`, {
-                                  plan_type: 'pro',
-                                  status: 'active',
-                                  days_to_add: 30
-                                }, getConfig());
-                                setOnboardingSuccess(`Activated PRO plan for ${sub.business_name}!`);
-                                await loadDashboard();
-                              } catch (err) {
-                                logClientError('Override subscription failed', err);
-                                setError('Failed to override subscription.');
-                              }
-                            }}
-                            style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid #2563eb', backgroundColor: '#ffffff', color: '#2563eb', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}
-                          >
-                            Grant +30 Days Pro
-                          </button>
+            <SectionCard>
+              <div className="table-wrapper">
+                <table className="admin-table">
+                  <thead>
+                    <tr>
+                      <th>Business Name</th>
+                      <th>Plan Type</th>
+                      <th>Status</th>
+                      <th>Days Remaining</th>
+                      <th>Amount Paid</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {subscriptions.length > 0 ? (
+                      subscriptions.map((sub) => (
+                        <tr key={sub.tenant_id}>
+                          <td className="vendor-name-cell">{sub.business_name}</td>
+                          <td>
+                            <span className="plan-badge">{sub.plan_type}</span>
+                          </td>
+                          <td>
+                            <StatusBadge status={String(sub.status)} />
+                          </td>
+                          <td>{sub.days_left} Days</td>
+                          <td>${sub.amount_paid}.00</td>
+                          <td>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  await api.patch(`/admin/subscriptions/${sub.tenant_id}`, {
+                                    plan_type: 'pro',
+                                    status: 'active',
+                                    days_to_add: 30
+                                  }, getConfig());
+                                  setOnboardingSuccess(`Activated PRO plan for ${sub.business_name}!`);
+                                  await loadDashboard();
+                                } catch (err) {
+                                  logClientError('Override subscription failed', err);
+                                  setError('Failed to override subscription.');
+                                }
+                              }}
+                              className="btn-small btn-outline"
+                            >
+                              Grant +30 Days Pro
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={6} className="empty-cell">
+                          No subscription records found.
                         </td>
                       </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={6} style={{ padding: '30px', textAlign: 'center', color: '#6b7280' }}>
-                        No subscription records found.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </SectionCard>
           </section>
         )}
 
         {/* Grant Subscription Modal */}
         {showGrantSubModal && (
-          <div
-            style={{
-              position: 'fixed',
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              backgroundColor: 'rgba(0,0,0,0.5)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '20px',
-              zIndex: 1000
-            }}
-          >
-            <div
-              style={{
-                backgroundColor: '#ffffff',
-                borderRadius: '16px',
-                padding: '28px',
-                width: '100%',
-                maxWidth: '480px',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                <h3 style={{ margin: 0, fontSize: '20px' }}>Grant Subscription Package</h3>
+          <div className="modal-overlay">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h3 className="modal-title">Grant Subscription Package</h3>
                 <button
                   type="button"
                   onClick={() => setShowGrantSubModal(false)}
-                  style={{ border: 'none', background: 'transparent', fontSize: '20px', cursor: 'pointer', color: '#64748b' }}
+                  className="btn-close"
                 >
                   ✕
                 </button>
               </div>
 
-              <p style={{ fontSize: '13px', color: '#64748b', marginBottom: '16px' }}>
+              <p className="modal-description">
                 This is an administrative grant for testing or vendor promotion. It will mark the vendor's subscription status as <strong>Active</strong> and payment status as <strong>Granted</strong> (not real payment).
               </p>
 
-              <form onSubmit={handleGrantSubscription}>
-                <div style={{ marginBottom: '14px' }}>
-                  <label style={{ display: 'block', marginBottom: '6px', fontWeight: '600', fontSize: '14px' }}>
+              <form onSubmit={handleGrantSubscription} className="modal-form">
+                <div className="form-group">
+                  <label className="form-label">
                     Vendor / Business
                   </label>
                   <input
                     type="text"
                     disabled
                     value={grantTenantName}
-                    style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', border: '1px solid #cbd5e1', borderRadius: '8px', backgroundColor: '#f1f5f9', fontWeight: '600' }}
+                    className="form-input disabled"
                   />
                 </div>
 
-                <div style={{ marginBottom: '20px' }}>
-                  <label style={{ display: 'block', marginBottom: '6px', fontWeight: '600', fontSize: '14px' }}>
+                <div className="form-group">
+                  <label className="form-label">
                     Subscription Package Duration
                   </label>
                   <select
                     value={grantPlanDuration}
                     onChange={(e) => setGrantPlanDuration(e.target.value)}
-                    style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '15px' }}
+                    className="form-input"
                   >
                     <option value="monthly">Monthly (30 Days)</option>
                     <option value="3_months">3 Months (90 Days)</option>
@@ -1902,20 +1567,84 @@ const AdminDashboard = () => {
                   </select>
                 </div>
 
-                <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                <div className="modal-actions">
                   <button
                     type="button"
                     onClick={() => setShowGrantSubModal(false)}
-                    style={{ padding: '10px 18px', border: '1px solid #cbd5e1', borderRadius: '8px', backgroundColor: '#ffffff', color: '#475569', fontWeight: '600', cursor: 'pointer' }}
+                    className="btn-secondary"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={grantLoading}
-                    style={{ padding: '10px 18px', border: 'none', borderRadius: '8px', backgroundColor: '#2563eb', color: '#ffffff', fontWeight: '600', cursor: grantLoading ? 'not-allowed' : 'pointer' }}
+                    className="btn-primary"
                   >
                     {grantLoading ? 'Granting...' : 'Confirm & Grant Package'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Slug Edit Modal */}
+        {showSlugModal && (
+          <div className="modal-overlay">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h3 className="modal-title">{slugTenantName ? `Set Slug for ${slugTenantName}` : 'Set Tenant Slug'}</h3>
+                <button
+                  type="button"
+                  onClick={() => setShowSlugModal(false)}
+                  className="btn-close"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <p className="modal-description">
+                This slug will be used in the customer-facing URL: <code className="url-preview">{window.location.origin}/v/your-slug</code>
+              </p>
+
+              <form onSubmit={handleSaveSlug} className="modal-form">
+                <div className="form-group">
+                  <label className="form-label">
+                    Branded Slug
+                  </label>
+                  <input
+                    type="text"
+                    value={slugInput}
+                    onChange={(e) => setSlugInput(e.target.value)}
+                    placeholder="e.g., test-cafe-hyderabad"
+                    disabled={slugSaving}
+                    className="form-input monospace"
+                  />
+                  <p className="form-help">
+                    Rules: lowercase letters, digits, hyphens only • 2-60 characters • cannot start/end with hyphen • must be unique
+                  </p>
+                </div>
+
+                {slugError && (
+                  <div className="error-message">
+                    {slugError}
+                  </div>
+                )}
+
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    onClick={() => setShowSlugModal(false)}
+                    className="btn-secondary"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={slugSaving}
+                    className="btn-primary"
+                  >
+                    {slugSaving ? 'Saving...' : 'Save Slug'}
                   </button>
                 </div>
               </form>

@@ -1896,3 +1896,86 @@ Rewrite policies
 ```
 
 The goal is to finish the existing implementation efficiently.
+
+---
+
+# 36. PHASE 7 — TENANT SLUG / BRANDED QR ROUTING (COMPLETE)
+
+## What was implemented
+
+### Database
+Migration file: `database/07_tenant_slug.sql`
+
+Added nullable `slug` column to `tenants` table with a unique partial index.
+
+### Backend — Public slug resolver
+Route: `GET /api/tenants/slug/:slug`
+
+No authentication required. Accepts a slug, validates format, finds active tenant, returns active QR code identifier.
+
+Response:
+```json
+{
+  "success": true,
+  "business_name": "Coffee House",
+  "qr_code": "4d70ca1b3a60e45cd1f5d09c5e0c34d6"
+}
+```
+
+### Backend — Owner slug management
+Route: `PATCH /api/owner/slug`
+
+Requires `vendor_owner` role. Validates format, checks uniqueness, saves.
+
+Request:
+```json
+{ "slug": "coffee-house" }
+```
+
+Response:
+```json
+{
+  "success": true,
+  "message": "Slug updated successfully",
+  "slug": "coffee-house",
+  "business_name": "Coffee House"
+}
+```
+
+### Frontend — SlugRedirect page
+File: `frontend/src/pages/customer/SlugRedirect.jsx`
+
+Public page at `/v/:slug`. Calls `GET /api/tenants/slug/:slug`, then immediately redirects to:
+```
+/customer/verify?qr_code=<code>
+```
+Shows loading spinner and business name. Shows error if slug not found.
+
+### Frontend — Route
+`App.jsx` has public route:
+```jsx
+<Route path="/v/:slug" element={<SlugRedirect />} />
+```
+
+### Frontend — Owner Dashboard
+Owner QR section now shows:
+- Existing QR image and identifier (unchanged)
+- New "Branded QR Link" sub-section:
+  - Shows current branded link: `https://yourdomain.com/v/coffee-house`
+  - Input to set/update the slug
+  - Inline validation
+  - Save button
+
+## Slug format rules
+- 2–60 characters
+- Lowercase letters, digits, hyphens only (a–z, 0–9, -)
+- Cannot start or end with a hyphen
+- Must be unique across all tenants
+
+## Physical QR usage
+Business owners can print/display a QR code pointing to:
+```
+https://yourdomain.com/v/coffee-house
+```
+instead of the long `?qr_code=...` URL. Both routes work identically.
+

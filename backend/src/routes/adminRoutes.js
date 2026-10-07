@@ -4,6 +4,7 @@ const router = express.Router();
 const supabaseAdmin = require('../config/supabaseAdmin');
 const { requireAuth } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
+const PDFDocument = require('pdfkit');
 
 /**
  * @swagger
@@ -176,7 +177,7 @@ router.get(
         await supabaseAdmin
           .from('tenants')
           .select(
-            'id, business_name, status, created_at, updated_at'
+            'id, business_name, status, created_at, updated_at, slug'
           )
           .order('created_at', { ascending: false });
 
@@ -563,12 +564,273 @@ router.get(
   }
 );
 
+const escapeReportCsvField = (value) => {
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  const stringValue = String(value);
+
+  if (
+    stringValue.includes(',') ||
+    stringValue.includes('"') ||
+    stringValue.includes('\n') ||
+    stringValue.includes('\r')
+  ) {
+    return `"${stringValue.replace(/"/g, '""')}"`;
+  }
+
+  return stringValue;
+};
+
+const buildMonthlyReportCsv = (report) => {
+  const {
+    business_name,
+    report_month,
+    summary,
+    daily_breakdown,
+    customer_frequency,
+    loyalty_program_status
+  } = report;
+
+  const lines = [];
+  const addRow = (...cells) => {
+    lines.push(cells.map(escapeReportCsvField).join(','));
+  };
+
+  addRow('QR Loyalty Monthly Report');
+  addRow('Business Name', business_name);
+  addRow('Report Month', report_month);
+  addRow('Generated At', new Date().toISOString());
+  lines.push('');
+
+  lines.push('SUMMARY');
+  addRow('Metric', 'Value');
+  addRow('Total Visits', summary.total_visits);
+  addRow('Unique Customers', summary.unique_customers);
+  addRow('Repeat Visits', summary.repeat_visits);
+  addRow('New Customers', summary.new_customers);
+  addRow('Average Visits per Customer', summary.avg_visits_per_customer);
+  addRow('Stamps Issued', summary.stamps_issued);
+  addRow('Rewards Redeemed', summary.rewards_redeemed);
+  addRow('Peak Visit Day', `${summary.peak_visit_day?.date} (${summary.peak_visit_day?.visits} visits)`);
+  addRow('Lowest Visit Day', `${summary.lowest_visit_day?.date} (${summary.lowest_visit_day?.visits} visits)`);
+  lines.push('');
+
+  lines.push('DAILY BREAKDOWN');
+  addRow('Date', 'Visits', 'Unique Customers', 'Stamps Issued', 'Rewards Redeemed');
+  (daily_breakdown || []).forEach((day) => {
+    addRow(day.date, day.visits, day.unique_customers, day.stamps, day.redemptions);
+  });
+  lines.push('');
+
+  lines.push('CUSTOMER VISIT FREQUENCY');
+  addRow('Customer Identifier', 'Visits');
+  (customer_frequency || []).forEach((entry) => {
+    addRow(entry.customer_identifier, entry.visits);
+  });
+  lines.push('');
+
+  const program = loyalty_program_status;
+  const loyaltySummary =
+    program && program.name
+      ? `${program.name} - ${program.stamps_required} stamps required - ${program.is_active ? 'Active' : 'Inactive'}${program.reward_description ? ` - Reward: ${program.reward_description}` : ''}`
+      : 'No active loyalty program';
+
+  lines.push('LOYALTY PROGRAM');
+  addRow('Status', loyaltySummary);
+
+  // BOM prefix so Excel decodes the UTF-8 content correctly.
+  return `\uFEFF${lines.join('\r\n')}\r\n`;
+};
+
+// Helvetica and the other standard-14 PDF fonts only support WinAnsi-encoded
+// characters, so anything outside that range degrades to '?' instead of
+// throwing during text encoding.
+const sanitizePdfText = (value) =>
+  String(value ?? '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[^\x20-\x7E\u00A0-\u00FF]/g, '?');
+
+const drawPdfTable = (doc, columnWidths, headerCells, rows) => {
+  const startX = doc.page.margins.left;
+  const totalWidth = columnWidths.reduce((sum, width) => sum + width, 0);
+  const bottomLimit = doc.page.height - doc.page.margins.bottom;
+  const cellPaddingX = 5;
+  const cellPaddingY = 5;
+  const fontSize = 9;
+  const headerHeight = 20;
+
+  const drawHeaderRow = () => {
+    const y = doc.y;
+    doc.rect(startX, y, totalWidth, headerHeight).fill('#1e3a8a');
+    doc.font('Helvetica-Bold').fontSize(fontSize).fillColor('#ffffff');
+    let x = startX;
+    headerCells.forEach((cell, i) => {
+      doc.text(sanitizePdfText(cell), x + cellPaddingX, y + 5, {
+        width: columnWidths[i] - cellPaddingX * 2,
+        lineBreak: false
+      });
+      x += columnWidths[i];
+    });
+    doc.y = y + headerHeight;
+    doc.font('Helvetica').fontSize(fontSize).fillColor('#111827');
+  };
+
+  drawHeaderRow();
+
+  rows.forEach((row, rowIndex) => {
+    doc.font('Helvetica').fontSize(fontSize).fillColor('#111827');
+    const cellTexts = row.map((cell) => sanitizePdfText(cell));
+    const cellHeights = cellTexts.map((text, i) =>
+      doc.heightOfString(text, { width: columnWidths[i] - cellPaddingX * 2 })
+    );
+    const rowHeight = Math.max(...cellHeights) + cellPaddingY * 2;
+
+    if (doc.y + rowHeight > bottomLimit) {
+      doc.addPage();
+      drawHeaderRow();
+    }
+
+    const y = doc.y;
+    if (rowIndex % 2 === 1) {
+      doc.rect(startX, y, totalWidth, rowHeight).fill('#f3f4f6');
+      doc.font('Helvetica').fontSize(fontSize).fillColor('#111827');
+    }
+
+    let x = startX;
+    cellTexts.forEach((text, i) => {
+      doc.text(text, x + cellPaddingX, y + cellPaddingY, {
+        width: columnWidths[i] - cellPaddingX * 2
+      });
+      x += columnWidths[i];
+    });
+    doc.y = y + rowHeight;
+  });
+};
+
+const drawPdfSectionHeading = (doc, title) => {
+  if (doc.y + 60 > doc.page.height - doc.page.margins.bottom) {
+    doc.addPage();
+  }
+  doc.font('Helvetica-Bold').fontSize(13).fillColor('#111827');
+  doc.text(sanitizePdfText(title));
+  doc.moveDown(0.5);
+};
+
+const drawMonthlyReportPdf = (doc, report) => {
+  const {
+    business_name,
+    report_month,
+    summary,
+    daily_breakdown,
+    customer_frequency,
+    loyalty_program_status
+  } = report;
+  const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+
+  doc.font('Helvetica-Bold').fontSize(20).fillColor('#111827');
+  doc.text('QR Loyalty Monthly Report');
+  doc.moveDown(0.2);
+
+  doc.font('Helvetica').fontSize(10).fillColor('#374151');
+  doc.text(`Business Name: ${sanitizePdfText(business_name)}`);
+  doc.text(`Report Month: ${sanitizePdfText(report_month)}`);
+  doc.text(`Generated: ${new Date().toISOString().slice(0, 19).replace('T', ' ')} UTC`);
+  doc.moveDown(0.5);
+
+  doc
+    .moveTo(doc.page.margins.left, doc.y)
+    .lineTo(doc.page.width - doc.page.margins.right, doc.y)
+    .lineWidth(1)
+    .strokeColor('#d1d5db')
+    .stroke();
+  doc.y += 20;
+
+  drawPdfSectionHeading(doc, 'Summary');
+  drawPdfTable(doc, [300, 195], ['Metric', 'Value'], [
+    ['Total Visits', String(summary.total_visits)],
+    ['Unique Customers', String(summary.unique_customers)],
+    ['Repeat Visits', String(summary.repeat_visits)],
+    ['New Customers', String(summary.new_customers)],
+    ['Average Visits per Customer', String(summary.avg_visits_per_customer)],
+    ['Stamps Issued', String(summary.stamps_issued)],
+    ['Rewards Redeemed', String(summary.rewards_redeemed)],
+    ['Peak Visit Day', `${summary.peak_visit_day?.date} (${summary.peak_visit_day?.visits} visits)`],
+    ['Lowest Visit Day', `${summary.lowest_visit_day?.date} (${summary.lowest_visit_day?.visits} visits)`]
+  ]);
+
+  doc.y += 24;
+  drawPdfSectionHeading(doc, 'Daily Visit Breakdown');
+  drawPdfTable(
+    doc,
+    [90, 70, 120, 105, 110],
+    ['Date', 'Visits', 'Unique Customers', 'Stamps Issued', 'Rewards Redeemed'],
+    (daily_breakdown || []).map((day) => [
+      day.date,
+      String(day.visits),
+      String(day.unique_customers),
+      String(day.stamps),
+      String(day.redemptions)
+    ])
+  );
+
+  doc.y += 24;
+  drawPdfSectionHeading(doc, 'Customer Visit Frequency');
+  if ((customer_frequency || []).length === 0) {
+    doc.font('Helvetica').fontSize(10).fillColor('#6b7280');
+    doc.text('No customer visits recorded for this month.');
+  } else {
+    drawPdfTable(
+      doc,
+      [395, 100],
+      ['Customer Identifier', 'Visits'],
+      customer_frequency.map((entry) => [entry.customer_identifier, String(entry.visits)])
+    );
+  }
+
+  doc.y += 24;
+  drawPdfSectionHeading(doc, 'Loyalty Program');
+  const program = loyalty_program_status;
+  const programText =
+    program && program.name
+      ? `${program.name} - ${program.stamps_required} stamps required - ${program.is_active ? 'Active' : 'Inactive'}${program.reward_description ? ` - Reward: ${program.reward_description}` : ''}`
+      : 'No active loyalty program';
+  doc.font('Helvetica').fontSize(10).fillColor('#374151');
+  doc.text(sanitizePdfText(programText), doc.page.margins.left, doc.y, { width: usableWidth });
+};
+
+const buildMonthlyReportPdfBuffer = (report) =>
+  new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: 'A4',
+      margin: 50,
+      info: {
+        Title: 'QR Loyalty Monthly Report',
+        Author: 'QR Loyalty',
+        Subject: `Monthly report for ${report.report_month}`
+      }
+    });
+
+    const chunks = [];
+    doc.on('data', (chunk) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    try {
+      drawMonthlyReportPdf(doc, report);
+      doc.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+
 /**
  * @swagger
  * /api/admin/reports/monthly:
  *   get:
  *     summary: Get detailed monthly report for a tenant (Admin only)
- *     description: Returns monthly tenant metrics, daily visit breakdown, customer frequency, and loyalty activity for a selected tenant and month.
+ *     description: Returns monthly tenant metrics, daily visit breakdown, customer frequency, and loyalty activity for a selected tenant and month. When the optional format query parameter is set to csv or pdf, the report is returned as a downloadable file instead of JSON.
  *     tags:
  *       - Admin
  *     security:
@@ -586,6 +848,13 @@ router.get(
  *         schema:
  *           type: string
  *           example: "2026-09"
+ *       - in: query
+ *         name: format
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [csv, pdf]
+ *         description: Optional file download format. Without it the report is returned as JSON.
  *     responses:
  *       200:
  *         description: Monthly tenant report retrieved successfully
@@ -606,12 +875,20 @@ router.get(
   requireRole('admin'),
   async (req, res) => {
     try {
-      const { tenant_id, month } = req.query;
+      const { tenant_id, month, format } = req.query;
 
       if (!tenant_id || !month || !/^\d{4}-\d{2}$/.test(month)) {
         return res.status(400).json({
           success: false,
           message: 'Valid tenant_id (UUID) and month (YYYY-MM) are required'
+        });
+      }
+
+      const downloadFormat = format ? String(format).toLowerCase() : null;
+      if (downloadFormat && downloadFormat !== 'csv' && downloadFormat !== 'pdf') {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid format. Allowed values are csv and pdf.'
         });
       }
 
@@ -799,27 +1076,42 @@ router.get(
         }))
         .sort((a, b) => b.visits - a.visits);
 
+      const report = {
+        business_name: tenant.business_name,
+        tenant_id: tenant.id,
+        report_month: month,
+        summary: {
+          total_visits: totalVisits,
+          unique_customers: uniqueCustomersCount,
+          repeat_visits: repeatVisits,
+          new_customers: newCustomers,
+          avg_visits_per_customer: avgVisitsPerCustomer,
+          stamps_issued: (monthStamps || []).length,
+          rewards_redeemed: (monthRedemptions || []).length,
+          peak_visit_day: peakDay,
+          lowest_visit_day: lowestDay
+        },
+        daily_breakdown: dailyBreakdown,
+        customer_frequency: customerFrequency,
+        loyalty_program_status: loyaltyProgram || { status: 'No active loyalty program' }
+      };
+
+      if (downloadFormat === 'csv') {
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="qr-loyalty-report-${month}.csv"`);
+        return res.status(200).send(buildMonthlyReportCsv(report));
+      }
+
+      if (downloadFormat === 'pdf') {
+        const pdfBuffer = await buildMonthlyReportPdfBuffer(report);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="qr-loyalty-report-${month}.pdf"`);
+        return res.status(200).send(pdfBuffer);
+      }
+
       return res.status(200).json({
         success: true,
-        report: {
-          business_name: tenant.business_name,
-          tenant_id: tenant.id,
-          report_month: month,
-          summary: {
-            total_visits: totalVisits,
-            unique_customers: uniqueCustomersCount,
-            repeat_visits: repeatVisits,
-            new_customers: newCustomers,
-            avg_visits_per_customer: avgVisitsPerCustomer,
-            stamps_issued: (monthStamps || []).length,
-            rewards_redeemed: (monthRedemptions || []).length,
-            peak_visit_day: peakDay,
-            lowest_visit_day: lowestDay
-          },
-          daily_breakdown: dailyBreakdown,
-          customer_frequency: customerFrequency,
-          loyalty_program_status: loyaltyProgram || { status: 'No active loyalty program' }
-        }
+        report
       });
     } catch (error) {
       console.error('Admin monthly report error:', error);

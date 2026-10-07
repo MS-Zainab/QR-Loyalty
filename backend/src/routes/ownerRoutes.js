@@ -46,9 +46,10 @@ router.get(
       // so the reads are independent and can run concurrently.
       const tenantQuery = supabaseAdmin
         .from('tenants')
-        .select('id, business_name, status, created_at')
+        .select('id, business_name, status, created_at, slug')
         .eq('id', tenantId)
         .single();
+
 
       // These tenant-scoped reads are independent, so run them together.
       const [
@@ -386,9 +387,8 @@ router.get(
         redemptionsByStaff.set(redemption.staff_id, entries);
       }
 
-      const staffList = (staff || []).flatMap((staffMember) => {
+      const staffList = (staff || []).map((staffMember) => {
         const profile = profilesById.get(staffMember.profile_id);
-        if (!profile) return [];
         const staffStamps = stampsByStaff.get(staffMember.id) || [];
         const staffRedemptions = redemptionsByStaff.get(staffMember.id) || [];
         const activityDates = [
@@ -397,14 +397,16 @@ router.get(
         ].filter(Boolean);
         activityDates.sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
 
-        return [{
+        return {
           staff_id: staffMember.id,
           profile_id: staffMember.profile_id,
-          staff_name: profile.full_name,
+          // A missing profile must not hide a real staff record from the
+          // owner; surface it with a placeholder name instead.
+          staff_name: profile?.full_name || 'Unknown (missing profile)',
           status: staffMember.is_active
             ? 'active'
             : 'inactive',
-          profile_status: profile.status,
+          profile_status: profile?.status || null,
           created_at: staffMember.created_at,
           updated_at: staffMember.updated_at,
           activity: {
@@ -414,7 +416,7 @@ router.get(
               ? activityDates[0]
               : null
           }
-        }];
+        };
       });
 
       return res.status(200).json({

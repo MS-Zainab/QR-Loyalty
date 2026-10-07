@@ -44,11 +44,15 @@ router.get(
         });
       }
 
-      const { data: program, error } = await supabaseAdmin
+      // A tenant may legitimately have more than one program (the customer
+      // progress logic supports it), so fetch all rows. `loyalty` keeps the
+      // most recent program for backward compatibility with existing
+      // consumers.
+      const { data: programs, error } = await supabaseAdmin
         .from('loyalty_programs')
         .select('*')
         .eq('tenant_id', tenantId)
-        .maybeSingle();
+        .order('created_at', { ascending: false });
 
       if (error) {
         console.error('Get loyalty program error:', error);
@@ -59,10 +63,14 @@ router.get(
         });
       }
 
+      const programList = programs || [];
+      const latest = programList[0] || null;
+
       return res.status(200).json({
         success: true,
-        loyalty: program,
-        program
+        loyalty: latest,
+        program: latest,
+        programs: programList
       });
     } catch (error) {
       console.error('Get loyalty program error:', error);
@@ -79,8 +87,8 @@ router.get(
  * @swagger
  * /api/loyalty:
  *   post:
- *     summary: Create or update loyalty program
- *     description: Creates a loyalty program for the authenticated vendor or updates the existing program. Only the vendor owner can perform this action.
+ *     summary: Create loyalty program
+ *     description: Creates a new loyalty program for the authenticated vendor. Only the vendor owner can perform this action.
  *     tags:
  *       - Loyalty
  *     security:
@@ -104,9 +112,13 @@ router.get(
  *                 minimum: 1
  *                 description: Number of stamps required to complete the loyalty program
  *                 example: 10
+ *               reward_description:
+ *                 type: string
+ *                 description: Optional description of the reward customers earn
+ *                 example: Free Coffee of Any Size
  *     responses:
  *       200:
- *         description: Loyalty program created or updated successfully
+ *         description: Loyalty program created successfully
  *       400:
  *         description: Invalid loyalty program data or user is not linked to a vendor
  *       401:
@@ -123,7 +135,7 @@ router.post(
   async (req, res) => {
     try {
       const tenantId = req.profile.tenant_id;
-      const { name, stamps_required } = req.body;
+      const { name, stamps_required, reward_description } = req.body;
 
       if (!tenantId) {
         return res.status(400).json({
@@ -149,54 +161,33 @@ router.post(
         });
       }
 
-      // Check whether this vendor already has a program
-      const { data: existingProgram, error: existingError } =
-        await supabaseAdmin
-          .from('loyalty_programs')
-          .select('id')
-          .eq('tenant_id', tenantId)
-          .maybeSingle();
-
-      if (existingError) {
-        console.error('Check loyalty program error:', existingError);
-
-        return res.status(500).json({
+      if (
+        reward_description !== undefined &&
+        typeof reward_description !== 'string'
+      ) {
+        return res.status(400).json({
           success: false,
-          message: 'Failed to check existing loyalty program'
+          message: 'reward_description must be a string'
         });
       }
 
-      let program;
-      let error;
+      // A tenant can run multiple loyalty programs, so every POST creates a
+      // new program; edits to an existing program go through PATCH /:id.
+      const programData = {
+        tenant_id: tenantId,
+        name: name.trim(),
+        stamps_required
+      };
 
-      if (existingProgram) {
-        const result = await supabaseAdmin
-          .from('loyalty_programs')
-          .update({
-            name: name.trim(),
-            stamps_required,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', existingProgram.id)
-          .select()
-          .single();
-
-        program = result.data;
-        error = result.error;
-      } else {
-        const result = await supabaseAdmin
-          .from('loyalty_programs')
-          .insert({
-            tenant_id: tenantId,
-            name: name.trim(),
-            stamps_required
-          })
-          .select()
-          .single();
-
-        program = result.data;
-        error = result.error;
+      if (reward_description !== undefined) {
+        programData.reward_description = reward_description.trim();
       }
+
+      const { data: program, error } = await supabaseAdmin
+        .from('loyalty_programs')
+        .insert(programData)
+        .select()
+        .single();
 
       if (error) {
         console.error('Save loyalty program error:', error);
@@ -209,9 +200,7 @@ router.post(
 
       return res.status(200).json({
         success: true,
-        message: existingProgram
-          ? 'Loyalty program updated successfully'
-          : 'Loyalty program created successfully',
+        message: 'Loyalty program created successfully',
         loyalty: program,
         program
       });

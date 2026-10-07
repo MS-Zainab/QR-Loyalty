@@ -2,6 +2,7 @@ const express = require('express');
 
 const { requireAuth } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
+const { normalizePhoneNumber } = require('../utils/phone');
 const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
@@ -59,7 +60,8 @@ router.post(
       const tenantId = qrRecord.tenant_id;
       const profileId = req.profile.id;
 
-      const { data: existingCustomer, error: existingError } =
+      // First try lookup by profile_id (primary key)
+      let { data: existingCustomer, error: existingError } =
         await supabaseAdmin
           .from('customers')
           .select(
@@ -81,6 +83,29 @@ router.post(
         });
       }
 
+      // Fallback: if not found by profile, try phone-based lookup within this tenant
+      if (!existingCustomer && phone) {
+        const normalizedPhone = normalizePhoneNumber(phone);
+        if (normalizedPhone) {
+          const { data: phoneCustomer } = await supabaseAdmin
+            .from('customers')
+            .select('id, tenant_id, profile_id, name, phone, email, status')
+            .eq('tenant_id', tenantId)
+            .eq('phone', normalizedPhone)
+            .eq('status', 'active')
+            .maybeSingle();
+
+          if (phoneCustomer) {
+            existingCustomer = phoneCustomer;
+            // Link this profile to the existing customer for future lookups
+            await supabaseAdmin
+              .from('customers')
+              .update({ profile_id: profileId })
+              .eq('id', phoneCustomer.id);
+          }
+        }
+      }
+
       if (existingCustomer) {
         return res.status(200).json({
           success: true,
@@ -89,6 +114,9 @@ router.post(
         });
       }
 
+      // Normalize phone before insert
+      const normalizedPhone = phone ? normalizePhoneNumber(phone) : (req.user.user_metadata?.phone ? normalizePhoneNumber(req.user.user_metadata.phone) : null);
+
       const { data: customer, error: customerError } =
         await supabaseAdmin
           .from('customers')
@@ -96,7 +124,7 @@ router.post(
             tenant_id: tenantId,
             profile_id: profileId,
             name: req.profile.full_name,
-            phone: phone || null,
+            phone: normalizedPhone || null,
             email: req.user.email || null,
             status: 'active'
           })
@@ -147,122 +175,143 @@ router.post(
  *
  * Each redemption consumes the stamps_required value of its reward.
  */
-async function calculateCustomerProgress(
-  tenantId,
-  customerId,
-  loyaltyProgram,
-  preloaded = {}
-) {
-  const stampCountQuery = preloaded.totalStamps !== undefined
-    ? Promise.resolve({ count: preloaded.totalStamps, error: null })
-    : supabaseAdmin
-        .from('stamps')
-        .select('id', {
-          count: 'exact',
-          head: true
-        })
-        .eq('tenant_id', tenantId)
-        .eq('customer_id', customerId);
-  const redemptionQuery = preloaded.redemptionRows !== undefined
-    ? Promise.resolve({ data: preloaded.redemptionRows, error: null })
-    : supabaseAdmin
-        .from('redemptions')
-        .select('id, reward_id')
-        .eq('tenant_id', tenantId)
-        .eq('customer_id', customerId);
-
+/**
+ * Calculate loyalty program progress per program.
+ *
+ * Progress is calculated independently per program.
+ * Valid visits/stamps for a program are counted during its validity window (if start_date/end_date exist).
+ * Redeeming a reward for one program consumes stamps for that program only.
+ */
+async function calculateCustomerProgramsProgress(tenantId, customerId) {
   const [
-    { count: totalStampCount, error: stampError },
-    { data: redemptionRows, error: redemptionError }
-  ] = await Promise.all([stampCountQuery, redemptionQuery]);
-  if (stampError) {
-    throw stampError;
-  }
+    { data: programs, error: programError },
+    { data: stamps, error: stampError },
+    { data: rewards, error: rewardError },
+    { data: redemptions, error: redemptionError }
+  ] = await Promise.all([
+    supabaseAdmin
+      .from('loyalty_programs')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .order('created_at', { ascending: true }),
+    supabaseAdmin
+      .from('stamps')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .eq('customer_id', customerId)
+      .order('created_at', { ascending: true }),
+    supabaseAdmin
+      .from('rewards')
+      .select('*')
+      .eq('tenant_id', tenantId),
+    supabaseAdmin
+      .from('redemptions')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .eq('customer_id', customerId)
+  ]);
 
-  if (redemptionError) {
-    throw redemptionError;
-  }
+  if (programError) throw programError;
+  if (stampError) throw stampError;
+  if (rewardError) throw rewardError;
+  if (redemptionError) throw redemptionError;
 
-  const totalStamps = totalStampCount || 0;
+  const now = new Date();
+  const allStamps = stamps || [];
+  const allRewards = rewards || [];
+  const allRedemptions = redemptions || [];
 
-  let consumedStamps = 0;
+  const programResults = [];
 
-  if (redemptionRows && redemptionRows.length > 0) {
-    const rewardIds = [
-      ...new Set(
-        redemptionRows
-          .map((redemption) => redemption.reward_id)
-          .filter(Boolean)
-      )
-    ];
+  for (const program of programs || []) {
+    const stampsRequired = Number(program.stamps_required) || 10;
+    const startDate = program.start_date ? new Date(program.start_date) : null;
+    const endDate = program.end_date ? new Date(program.end_date) : null;
 
-    if (rewardIds.length > 0) {
-      const { data: redeemedRewards, error: rewardError } =
-        await supabaseAdmin
-          .from('rewards')
-          .select('id, stamps_required')
-          .eq('tenant_id', tenantId)
-          .in('id', rewardIds);
+    // Check validity
+    const isExpired = endDate ? now > endDate : false;
+    const isStarted = startDate ? now >= startDate : true;
+    const isActive = program.is_active !== false && isStarted && !isExpired;
 
-      if (rewardError) {
-        throw rewardError;
+    // Filter stamps valid for this program
+    const validStamps = allStamps.filter((s) => {
+      if (s.loyalty_program_id && s.loyalty_program_id === program.id) {
+        return true;
       }
+      const stampDate = new Date(s.created_at);
+      if (startDate && stampDate < startDate) return false;
+      if (endDate && stampDate > endDate) return false;
+      return true;
+    });
 
-      const rewardStampMap = new Map(
-        (redeemedRewards || []).map((reward) => [
-          reward.id,
-          Number(reward.stamps_required) || 0
-        ])
-      );
+    // Find rewards linked to this program or fallback to matching tenant rewards
+    const programRewards = allRewards.filter(
+      (r) => r.loyalty_program_id === program.id
+    );
 
-      consumedStamps = redemptionRows.reduce(
-        (total, redemption) => {
-          return (
-            total +
-            (rewardStampMap.get(redemption.reward_id) || 0)
-          );
-        },
-        0
-      );
+    // Calculate consumed stamps for this program from redemptions of this program's rewards
+    let consumedStamps = 0;
+    if (programRewards.length > 0) {
+      const rewardIds = new Set(programRewards.map((r) => r.id));
+      const rewardMap = new Map(programRewards.map((r) => [r.id, Number(r.stamps_required) || stampsRequired]));
+
+      for (const rdm of allRedemptions) {
+        if (rewardIds.has(rdm.reward_id)) {
+          consumedStamps += (rewardMap.get(rdm.reward_id) || stampsRequired);
+        }
+      }
+    } else {
+      // If no explicit rewards are linked, check general redemptions for this program's stamp target
+      for (const rdm of allRedemptions) {
+        const matchingReward = allRewards.find((r) => r.id === rdm.reward_id);
+        const req = matchingReward ? Number(matchingReward.stamps_required) : stampsRequired;
+        if (req === stampsRequired) {
+          consumedStamps += req;
+        }
+      }
     }
+
+    const totalValidStamps = validStamps.length;
+    const currentProgress = Math.max(0, totalValidStamps - consumedStamps);
+    const remainingVisits = Math.max(0, stampsRequired - currentProgress);
+    const rewardUnlocked = currentProgress >= stampsRequired;
+
+    const matchingReward = programRewards[0] || allRewards.find(r => Number(r.stamps_required) === stampsRequired);
+    const rewardTitle = matchingReward?.name || program.reward_description || program.name || 'Reward';
+    const rewardDescription = matchingReward?.description || program.reward_description || '';
+
+    programResults.push({
+      id: program.id,
+      tenant_id: program.tenant_id,
+      name: program.name,
+      stamps_required: stampsRequired,
+      reward_description: rewardDescription,
+      reward_title: rewardTitle,
+      is_active: isActive,
+      is_expired: isExpired,
+      start_date: program.start_date || null,
+      end_date: program.end_date || null,
+      total_stamps: totalValidStamps,
+      consumed_stamps: consumedStamps,
+      current_stamps: currentProgress,
+      current_progress: currentProgress,
+      remaining_visits: remainingVisits,
+      stamps_remaining: remainingVisits,
+      reward_unlocked: rewardUnlocked,
+      created_at: program.created_at,
+      updated_at: program.updated_at
+    });
   }
-
-  let stampsRequired = loyaltyProgram
-    ? Number(loyaltyProgram.stamps_required)
-    : 0;
-
-  if (!Number.isInteger(stampsRequired) || stampsRequired <= 0) {
-    stampsRequired = 0;
-  }
-
-  const currentProgress = Math.max(
-    totalStamps - consumedStamps,
-    0
-  );
-
-  const completedCycles =
-    stampsRequired > 0
-      ? Math.floor(currentProgress / stampsRequired)
-      : 0;
-
-  const remainingStamps =
-    stampsRequired > 0
-      ? Math.max(
-          stampsRequired - currentProgress,
-          0
-        )
-      : 0;
 
   return {
-    total_stamps: totalStamps,
-    consumed_stamps: consumedStamps,
-    current_progress: currentProgress,
-    stamps_required: stampsRequired,
-    remaining_stamps: remainingStamps,
-    completed_cycles: completedCycles
+    all_programs: programResults,
+    active_programs: programResults.filter((p) => p.is_active),
+    expired_programs: programResults.filter((p) => p.is_expired),
+    stamps: allStamps,
+    redemptions: allRedemptions,
+    rewards: allRewards
   };
 }
-
 
 /**
  * @swagger
@@ -319,85 +368,18 @@ router.get(
       const memberships = [];
 
       for (const customer of customers) {
-        const { data: loyaltyProgram, error: loyaltyError } =
-          await supabaseAdmin
-            .from('loyalty_programs')
-            .select(
-              'id, tenant_id, name, reward_description, stamps_required, is_active'
-            )
-            .eq('tenant_id', customer.tenant_id)
-            .eq('is_active', true)
-            .maybeSingle();
-
-        if (loyaltyError) {
-          console.error(
-            'Loyalty program lookup error:',
-            loyaltyError
-          );
-
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve loyalty program'
-          });
-        }
-
-        const progress = await calculateCustomerProgress(
+        const progData = await calculateCustomerProgramsProgress(
           customer.tenant_id,
-          customer.id,
-          loyaltyProgram
+          customer.id
         );
-
-        const { data: rewards, error: rewardError } =
-          await supabaseAdmin
-            .from('rewards')
-            .select(
-              'id, loyalty_program_id, name, description, stamps_required, is_active'
-            )
-            .eq('tenant_id', customer.tenant_id)
-            .eq('is_active', true);
-
-        if (rewardError) {
-          console.error(
-            'Customer reward lookup error:',
-            rewardError
-          );
-
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve rewards'
-          });
-        }
-
-        const { data: redemptions, error: redemptionError } =
-          await supabaseAdmin
-            .from('redemptions')
-            .select(
-              'id, reward_id, staff_id, redeemed_at, created_at'
-            )
-            .eq('tenant_id', customer.tenant_id)
-            .eq('customer_id', customer.id)
-            .order('redeemed_at', {
-              ascending: false
-            });
-
-        if (redemptionError) {
-          console.error(
-            'Customer redemption lookup error:',
-            redemptionError
-          );
-
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve redemption history'
-          });
-        }
 
         memberships.push({
           customer,
-          loyalty_program: loyaltyProgram,
-          progress,
-          rewards: rewards || [],
-          redemptions: redemptions || []
+          loyalty_programs: progData.all_programs,
+          active_programs: progData.active_programs,
+          expired_programs: progData.expired_programs,
+          rewards: progData.rewards,
+          redemptions: progData.redemptions
         });
       }
 
@@ -474,35 +456,16 @@ router.get(
       const stampHistory = [];
 
       for (const customer of customers) {
-        const [
-          { data: stamps, error: stampError },
-          { data: loyaltyProgram, error: loyaltyError },
-          { data: redemptionRows, error: redemptionError }
-        ] = await Promise.all([
-          supabaseAdmin
-            .from('stamps')
-            .select(
-              'id, tenant_id, customer_id, staff_id, visit_id, created_at'
-            )
-            .eq('tenant_id', customer.tenant_id)
-            .eq('customer_id', customer.id)
-            .order('created_at', {
-              ascending: false
-            }),
-          supabaseAdmin
-            .from('loyalty_programs')
-            .select(
-              'id, stamps_required, is_active'
-            )
-            .eq('tenant_id', customer.tenant_id)
-            .eq('is_active', true)
-            .maybeSingle(),
-          supabaseAdmin
-            .from('redemptions')
-            .select('id, reward_id')
-            .eq('tenant_id', customer.tenant_id)
-            .eq('customer_id', customer.id)
-        ]);
+        const { data: stamps, error: stampError } = await supabaseAdmin
+          .from('stamps')
+          .select(
+            'id, tenant_id, customer_id, staff_id, visit_id, created_at'
+          )
+          .eq('tenant_id', customer.tenant_id)
+          .eq('customer_id', customer.id)
+          .order('created_at', {
+            ascending: false
+          });
 
         if (stampError) {
           console.error(
@@ -516,39 +479,15 @@ router.get(
           });
         }
 
-        if (loyaltyError) {
-          console.error(
-            'Customer stamp history loyalty lookup error:',
-            loyaltyError
-          );
-
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve loyalty program'
-          });
-        }
-
-        if (redemptionError) {
-          console.error(
-            'Customer stamp history redemption lookup error:',
-            redemptionError
-          );
-
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to retrieve redemption history'
-          });
-        }
-
-        const progress = await calculateCustomerProgress(
+        // Reuse the shared multi-program progress calculation so this route
+        // stays consistent with /me and /me/rewards.
+        const progData = await calculateCustomerProgramsProgress(
           customer.tenant_id,
-          customer.id,
-          loyaltyProgram,
-          {
-            totalStamps: stamps?.length || 0,
-            redemptionRows: redemptionRows || []
-          }
+          customer.id
         );
+
+        const program =
+          progData.active_programs[0] || progData.all_programs[0] || null;
 
         stampHistory.push({
           customer_id: customer.id,
@@ -559,10 +498,14 @@ router.get(
           total_stamps: stamps ? stamps.length : 0,
 
           // Current loyalty progress after redemptions.
-          current_progress: progress.current_progress,
-          consumed_stamps: progress.consumed_stamps,
-          stamps_required: progress.stamps_required,
-          stamps_remaining: progress.remaining_stamps,
+          current_progress: program
+            ? program.current_progress
+            : stamps
+              ? stamps.length
+              : 0,
+          consumed_stamps: program ? program.consumed_stamps : 0,
+          stamps_required: program ? program.stamps_required : 10,
+          stamps_remaining: program ? program.remaining_visits : null,
 
           // Full historical stamp records are preserved.
           stamps: stamps || []
@@ -710,118 +653,120 @@ router.get(
     try {
       const profileId = req.profile.id;
 
-      const { data: customer, error: customerError } =
+      // A customer can be enrolled with multiple vendors, so fetch all
+      // memberships. A brand-new customer without any membership yet gets an
+      // empty (successful) response instead of a 404.
+      const { data: customers, error: customerError } =
         await supabaseAdmin
           .from('customers')
           .select('id, tenant_id, status')
           .eq('profile_id', profileId)
-          .eq('status', 'active')
-          .maybeSingle();
+          .eq('status', 'active');
 
-      if (customerError || !customer) {
-        return res.status(404).json({
-          success: false,
-          message: 'Customer record not found'
-        });
-      }
-
-      const { data: loyaltyProgram, error: loyaltyError } =
-        await supabaseAdmin
-          .from('loyalty_programs')
-          .select(
-            'id, tenant_id, stamps_required, is_active'
-          )
-          .eq('tenant_id', customer.tenant_id)
-          .eq('is_active', true)
-          .maybeSingle();
-
-      if (loyaltyError) {
+      if (customerError) {
         console.error(
-          'Customer rewards loyalty lookup error:',
-          loyaltyError
+          'Customer rewards membership lookup error:',
+          customerError
         );
 
         return res.status(500).json({
           success: false,
-          message: 'Failed to retrieve loyalty program'
+          message: 'Failed to retrieve customer rewards'
         });
       }
 
-      const { data: rewards, error: rewardsError } =
-        await supabaseAdmin
-          .from('rewards')
-          .select(
-            'id, tenant_id, loyalty_program_id, name, description, stamps_required, is_active'
-          )
-          .eq('tenant_id', customer.tenant_id)
-          .eq('is_active', true)
-          .order('created_at', {
-            ascending: true
-          });
+      if (!customers || customers.length === 0) {
+        return res.status(200).json({
+          success: true,
+          message: 'No active vendor memberships found',
+          rewards: [],
+          active_programs: [],
+          expired_programs: [],
+          programs: []
+        });
+      }
 
-      if (rewardsError) {
-        console.error(
-          'Customer rewards error:',
-          rewardsError
+      const allRewards = [];
+      const activePrograms = [];
+      const expiredPrograms = [];
+      const allPrograms = [];
+      let firstActiveProg = null;
+
+      for (const customer of customers) {
+        const progData = await calculateCustomerProgramsProgress(
+          customer.tenant_id,
+          customer.id
         );
 
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve rewards'
-        });
-      }
+        const activeProg = progData.active_programs[0] || null;
+        if (activeProg && !firstActiveProg) {
+          firstActiveProg = activeProg;
+        }
 
-      const progress = await calculateCustomerProgress(
-        customer.tenant_id,
-        customer.id,
-        loyaltyProgram
-      );
+        for (const program of progData.all_programs) {
+          allPrograms.push({ ...program, tenant_id: customer.tenant_id });
+        }
+        for (const program of progData.active_programs) {
+          activePrograms.push({ ...program, tenant_id: customer.tenant_id });
+        }
+        for (const program of progData.expired_programs) {
+          expiredPrograms.push({ ...program, tenant_id: customer.tenant_id });
+        }
 
-      const result = (rewards || []).map((reward) => {
-        const rewardRequired =
-          Number(reward.stamps_required) || 0;
+        for (const reward of progData.rewards || []) {
+          const rewardRequired = Number(reward.stamps_required) || 0;
+          const matchingProg =
+            progData.all_programs.find(
+              (p) =>
+                p.id === reward.loyalty_program_id ||
+                p.stamps_required === rewardRequired
+            ) || activeProg;
 
-        const currentStamps =
-          progress.current_progress;
-
-        const eligible =
-          rewardRequired > 0 &&
-          currentStamps >= rewardRequired;
-
-        const stampsRemaining =
-          rewardRequired > 0
-            ? Math.max(
-                rewardRequired - currentStamps,
-                0
-              )
+          const currentStamps = matchingProg
+            ? matchingProg.current_stamps
             : 0;
+          const eligible =
+            rewardRequired > 0 && currentStamps >= rewardRequired;
+          const stampsRemaining =
+            rewardRequired > 0
+              ? Math.max(rewardRequired - currentStamps, 0)
+              : 0;
 
-        return {
-          ...reward,
+          allRewards.push({
+            ...reward,
+            tenant_id: customer.tenant_id,
+            total_stamps: currentStamps,
+            stamps_remaining: stampsRemaining,
+            eligible
+          });
+        }
+      }
 
-          // Current available stamps, not lifetime stamps.
-          total_stamps: currentStamps,
-
-          stamps_remaining: stampsRemaining,
-
-          eligible
-        };
-      });
-
-      return res.status(200).json({
+      const response = {
         success: true,
         message: 'Customer rewards retrieved successfully',
-        rewards: result,
+        rewards: allRewards,
+        active_programs: activePrograms,
+        expired_programs: expiredPrograms,
+        programs: allPrograms
+      };
 
-        progress: {
-          total_stamps: progress.total_stamps,
-          consumed_stamps: progress.consumed_stamps,
-          current_progress: progress.current_progress,
-          stamps_required: progress.stamps_required,
-          stamps_remaining: progress.remaining_stamps,
-          completed_cycles: progress.completed_cycles
-        }
-      });
+      // Only report progress when an active program actually exists, so the
+      // frontend renders a real empty state instead of derived defaults.
+      if (firstActiveProg) {
+        response.progress = {
+          total_stamps: firstActiveProg.total_stamps,
+          consumed_stamps: firstActiveProg.consumed_stamps,
+          current_progress: firstActiveProg.current_stamps,
+          stamps_required: firstActiveProg.stamps_required,
+          stamps_remaining: firstActiveProg.remaining_visits,
+          completed_cycles: Math.floor(
+            firstActiveProg.consumed_stamps / firstActiveProg.stamps_required
+          )
+        };
+      }
+
+      return res.status(200).json(response);
     } catch (error) {
       console.error(
         'Customer rewards route error:',

@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { requireAuth } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
 const { createRateLimiter } = require('../middleware/rateLimit');
+const { normalizePhoneNumber } = require('../utils/phone');
 const supabaseAdmin = require('../config/supabaseAdmin');
 
 const router = express.Router();
@@ -51,15 +52,47 @@ router.post(
         });
       }
 
-      // Find the operational staff record linked to this profile
-      const { data: staffRecord, error: staffError } =
-        await supabaseAdmin
-          .from('staff')
-          .select('id')
-          .eq('profile_id', profileId)
-          .eq('tenant_id', tenantId)
-          .eq('is_active', true)
+      // Find the operational staff record linked to this profile.
+      // Legacy staff (created before the staff table existed) may lack a
+      // row; repair it the same way /staff/activity does.
+      let { data: staffRecord, error: staffError } = await supabaseAdmin
+        .from('staff')
+        .select('id')
+        .eq('profile_id', profileId)
+        .eq('tenant_id', tenantId)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (!staffRecord && !staffError) {
+        const { data: profileCheck } = await supabaseAdmin
+          .from('profiles')
+          .select('id, tenant_id, role')
+          .eq('id', profileId)
           .maybeSingle();
+
+        if (
+          profileCheck &&
+          (profileCheck.role === 'vendor_staff' ||
+            profileCheck.role === 'vendor_owner')
+        ) {
+          const { data: repairedStaff, error: repairError } =
+            await supabaseAdmin
+              .from('staff')
+              .insert({
+                tenant_id: tenantId,
+                profile_id: profileId,
+                is_active: true
+              })
+              .select('id')
+              .single();
+
+          if (repairError) {
+            console.error('Staff record auto-repair error:', repairError);
+          } else {
+            staffRecord = repairedStaff;
+          }
+        }
+      }
 
       if (staffError) {
         console.error('Get staff record error:', staffError);
@@ -316,14 +349,43 @@ router.post(
 
       let activeCustomer = customer;
       if (!activeCustomer) {
+        // Before creating a new customer, try to find an existing one by phone within this tenant.
+        // This handles cases where the profile_id lookup missed but the same phone already has a customer record.
+        const customerPhone = req.user.user_metadata?.phone || null;
+        if (customerPhone) {
+          const normalizedPhone = normalizePhoneNumber(customerPhone);
+          if (normalizedPhone) {
+            const { data: phoneCustomer } = await supabaseAdmin
+              .from('customers')
+              .select('id, tenant_id, profile_id, name, status')
+              .eq('tenant_id', tenantId)
+              .eq('phone', normalizedPhone)
+              .eq('status', 'active')
+              .maybeSingle();
+
+            if (phoneCustomer) {
+              activeCustomer = phoneCustomer;
+            }
+          }
+        }
+      }
+
+      if (!activeCustomer) {
         // Auto-enroll customer for this tenant upon scanning vendor QR
+        const customerName =
+          req.profile.full_name ||
+          req.user.user_metadata?.full_name ||
+          'Customer';
+        const customerPhone = req.user.user_metadata?.phone || null;
+        const normalizedPhone = customerPhone ? normalizePhoneNumber(customerPhone) : null;
+
         const { data: newCustomer, error: enrollError } = await supabaseAdmin
           .from('customers')
           .insert({
             tenant_id: tenantId,
             profile_id: req.profile.id,
-            name: req.profile.full_name || 'Customer',
-            phone: req.profile.phone || null,
+            name: customerName,
+            phone: normalizedPhone,
             email: req.user.email || null,
             status: 'active'
           })
@@ -338,6 +400,16 @@ router.post(
           });
         }
         activeCustomer = newCustomer;
+      } else {
+        // If we found an existing customer by phone but with a different profile_id,
+        // update the profile_id to link them correctly (handles account migration).
+        if (activeCustomer.profile_id !== req.profile.id) {
+          await supabaseAdmin
+            .from('customers')
+            .update({ profile_id: req.profile.id })
+            .eq('id', activeCustomer.id);
+          activeCustomer.profile_id = req.profile.id;
+        }
       }
 
       if (staffError) {

@@ -5,32 +5,9 @@ const supabaseAdmin = require('../config/supabaseAdmin');
 const { requireAuth } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
 const { createRateLimiter } = require('../middleware/rateLimit');
+const { normalizePhoneNumber } = require('../utils/phone');
 
 const router = express.Router();
-
-function normalizePhoneNumber(phoneInput) {
-  if (!phoneInput || typeof phoneInput !== 'string') return null;
-
-  const cleaned = phoneInput.replace(/[\s\-\.\(\)]/g, '').trim();
-
-  // Validate Pakistan mobile formats: 03XXXXXXXXX, 923XXXXXXXXX, +923XXXXXXXXX
-  const pkMatch = cleaned.match(/^(?:\+?92|0)?(3\d{9})$/);
-  if (pkMatch) {
-    return `+92${pkMatch[1]}`;
-  }
-
-  // General E.164 phone numbers (10 to 15 digits)
-  const intlMatch = cleaned.match(/^(\+?\d{10,15})$/);
-  if (intlMatch) {
-    let num = intlMatch[1];
-    if (!num.startsWith('+')) {
-      num = '+' + num;
-    }
-    return num;
-  }
-
-  return null;
-}
 
 /**
  * @swagger
@@ -232,11 +209,53 @@ router.post(
 
       if (authUserSession && authUserSession.session) {
         // Retrieve profile
-        const { data: profile } = await supabaseAdmin
+        let { data: profile } = await supabaseAdmin
           .from('profiles')
           .select('*')
           .eq('auth_user_id', authUserSession.user.id)
           .maybeSingle();
+
+        // Legacy customer auth accounts may predate profile rows. Repair the
+        // missing profile here (same shape as the signup path below) instead
+        // of returning a fabricated profile that later 403s in middleware.
+        if (!profile) {
+          const { data: repairedProfile, error: repairError } =
+            await supabaseAdmin
+              .from('profiles')
+              .insert({
+                auth_user_id: authUserSession.user.id,
+                full_name:
+                  authUserSession.user.user_metadata?.full_name ||
+                  formattedName,
+                role: 'customer',
+                status: 'active'
+              })
+              .select('*')
+              .single();
+
+          if (repairError || !repairedProfile) {
+            console.error(
+              'Customer profile repair error:',
+              repairError
+            );
+
+            return res.status(500).json({
+              success: false,
+              message:
+                'Customer account exists but its profile could not be loaded. Please contact support.'
+            });
+          }
+
+          profile = repairedProfile;
+        }
+
+        if (profile.role !== 'customer') {
+          return res.status(403).json({
+            success: false,
+            message:
+              'This phone number is linked to a non-customer account. Please use the staff/owner login.'
+          });
+        }
 
         return res.status(200).json({
           success: true,
@@ -244,12 +263,7 @@ router.post(
           access_token: authUserSession.session.access_token,
           refresh_token: authUserSession.session.refresh_token,
           user: authUserSession.user,
-          profile: profile || {
-            id: authUserSession.user.id,
-            full_name: formattedName,
-            role: 'customer',
-            status: 'active'
-          }
+          profile
         });
       }
 
@@ -273,7 +287,14 @@ router.post(
         });
       }
 
-      // Create profile record
+      // SECURITY LIMITATION (acknowledged for Phase 1): the password is
+      // deterministically derived from the phone number, so anyone who knows
+      // a customer's phone number can access that customer's loyalty
+      // history. Stronger customer verification (e.g. OTP) is deferred.
+
+      // Create profile record. A customer must never receive a fabricated
+      // fallback profile: without a real row, requireAuth would 403 on every
+      // subsequent request. Roll back the auth user if the insert fails.
       const { data: newProfile, error: profileError } = await supabaseAdmin
         .from('profiles')
         .insert({
@@ -285,8 +306,17 @@ router.post(
         .select('*')
         .single();
 
-      if (profileError) {
+      if (profileError || !newProfile) {
         console.error('Customer profile creation error:', profileError);
+
+        await supabaseAdmin.auth.admin
+          .deleteUser(authData.user.id)
+          .catch(() => {});
+
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create customer profile'
+        });
       }
 
       // Sign in to get session tokens
@@ -308,12 +338,7 @@ router.post(
         access_token: sessionData.session.access_token,
         refresh_token: sessionData.session.refresh_token,
         user: sessionData.user,
-        profile: newProfile || {
-          id: authData.user.id,
-          full_name: formattedName,
-          role: 'customer',
-          status: 'active'
-        }
+        profile: newProfile
       });
     } catch (error) {
       console.error('Customer login error:', error);

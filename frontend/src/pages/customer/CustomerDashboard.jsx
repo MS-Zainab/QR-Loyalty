@@ -4,6 +4,9 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
 import { logClientError } from '../../services/logging';
+import { theme } from '../../theme';
+import DigitalLoyaltyCard from '../../components/DigitalLoyaltyCard';
+import './CustomerDashboard.css';
 
 const CustomerDashboard = () => {
   const navigate = useNavigate();
@@ -13,6 +16,8 @@ const CustomerDashboard = () => {
   const [stamps, setStamps] = useState([]);
   const [redemptions, setRedemptions] = useState([]);
   const [rewards, setRewards] = useState([]);
+  const [activePrograms, setActivePrograms] = useState([]);
+  const [expiredPrograms, setExpiredPrograms] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -72,6 +77,25 @@ const CustomerDashboard = () => {
     return date.toLocaleString();
   };
 
+  const formatExpiryDate = (dateValue) => {
+    if (!dateValue) return 'No expiration date';
+    const date = new Date(dateValue);
+    if (Number.isNaN(date.getTime())) return String(dateValue);
+    return date.toLocaleDateString(undefined, {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric'
+    });
+  };
+
+  const renderBlockProgress = (current, total) => {
+    const safeTotal = Math.max(1, Math.min(30, total));
+    const safeCurrent = Math.max(0, Math.min(safeTotal, current));
+    const filled = '█'.repeat(safeCurrent);
+    const empty = '░'.repeat(safeTotal - safeCurrent);
+    return filled + empty;
+  };
+
   const loadCustomerData = async (signal) => {
     try {
       setLoading(true);
@@ -82,24 +106,20 @@ const CustomerDashboard = () => {
       const [
         stampsResponse,
         redemptionsResponse,
-        rewardsResponse
+        rewardsResponse,
+        meResponse
       ] = await Promise.all([
         api.get('/customers/me/stamps', config),
-        api.get(
-          '/customers/me/redemptions',
-          config
-        ),
-        api.get('/customers/me/rewards', config)
+        api.get('/customers/me/redemptions', config),
+        api.get('/customers/me/rewards', config),
+        api.get('/customers/me', config).catch(() => ({ data: {} }))
       ]);
 
       if (signal?.aborted) return;
 
-      const progressData =
-        rewardsResponse.data?.progress ||
-        {};
+      const progressData = rewardsResponse.data?.progress || {};
 
-      const stampHistory =
-        stampsResponse.data?.stamp_history;
+      const stampHistory = stampsResponse.data?.stamp_history;
       const stampData = Array.isArray(stampHistory)
         ? stampHistory.flatMap((group) =>
             (group?.stamps || []).map((stamp) => ({
@@ -120,8 +140,7 @@ const CustomerDashboard = () => {
           )
         : [];
 
-      const redemptionHistory =
-        redemptionsResponse.data?.redemption_history;
+      const redemptionHistory = redemptionsResponse.data?.redemption_history;
       const redemptionData = Array.isArray(redemptionHistory)
         ? redemptionHistory.flatMap((group) =>
             (group?.redemptions || []).map((redemption) => ({
@@ -143,12 +162,9 @@ const CustomerDashboard = () => {
         : [];
 
       setCustomer({
-        current_stamps:
-          progressData.current_progress ?? 0,
-        stamp_target:
-          progressData.stamps_required ?? 10,
-        rewards_redeemed:
-          normalizedRedemptions.length
+        current_stamps: progressData.current_progress ?? 0,
+        stamp_target: progressData.stamps_required ?? 10,
+        rewards_redeemed: normalizedRedemptions.length
       });
       setStamps(normalizedStamps);
       setRedemptions(normalizedRedemptions);
@@ -159,11 +175,22 @@ const CustomerDashboard = () => {
         rewardsResponse.data ||
         [];
 
-      setRewards(
-        Array.isArray(rewardData)
-          ? rewardData
-          : []
-      );
+      setRewards(Array.isArray(rewardData) ? rewardData : []);
+
+      // Active and Expired Programs parsing — no fabricated fallback: if the
+      // API returns none, the dashboard renders its real empty state.
+      const activeProgs =
+        rewardsResponse.data?.active_programs ||
+        meResponse.data?.memberships?.flatMap((m) => m.active_programs || []) ||
+        [];
+
+      const expiredProgs =
+        rewardsResponse.data?.expired_programs ||
+        meResponse.data?.memberships?.flatMap((m) => m.expired_programs || []) ||
+        [];
+
+      setActivePrograms(activeProgs);
+      setExpiredPrograms(expiredProgs);
     } catch (err) {
       if (signal?.aborted) return;
       logClientError('Failed to load customer dashboard', err);
@@ -182,21 +209,21 @@ const CustomerDashboard = () => {
 
   useEffect(() => {
     const userId = session?.user?.id;
-    if (!userId || loadedForUser.current === userId) return;
-    loadedForUser.current = userId;
+    if (!userId) return;
+
+    // Always reload data when component mounts to ensure fresh state after visit verification
     setCustomer(null);
     setStamps([]);
     setRedemptions([]);
     setRewards([]);
+    setActivePrograms([]);
+    setExpiredPrograms([]);
     setLoadedForUserId(userId);
     const controller = new AbortController();
     loadCustomerDataEffect(controller.signal);
 
     return () => {
       controller.abort();
-      if (loadedForUser.current === userId) {
-        loadedForUser.current = null;
-      }
     };
   }, [session?.user?.id]);
 
@@ -313,12 +340,57 @@ const CustomerDashboard = () => {
 
   return (
     <div
+      className="customer-dashboard"
       style={{
         minHeight: '100vh',
         backgroundColor: '#f5f7fb',
         fontFamily: 'Arial, sans-serif'
       }}
     >
+      {/* Responsive styles */}
+      <style>{`
+        @media (max-width: 768px) {
+          .responsive-container {
+            padding: 20px !important;
+          }
+          .responsive-card {
+            padding: 16px !important;
+          }
+          .responsive-header {
+            font-size: 24px !important;
+          }
+          .responsive-stat-value {
+            font-size: 24px !important;
+          }
+          .responsive-flex {
+            flex-direction: column !important;
+          }
+          .responsive-table-wrapper {
+            overflow-x: auto !important;
+            -webkit-overflow-scrolling: touch !important;
+          }
+          .responsive-code {
+            font-size: 12px !important;
+            word-break: break-all !important;
+          }
+          .responsive-button {
+            width: 100% !important;
+            margin-top: 8px !important;
+          }
+        }
+
+        @media (max-width: 480px) {
+          .responsive-container {
+            padding: 12px !important;
+          }
+          .responsive-card {
+            padding: 12px !important;
+          }
+          .responsive-header {
+            font-size: 20px !important;
+          }
+        }
+      `}</style>
       {/* Header */}
       <header
         style={{
@@ -376,10 +448,13 @@ const CustomerDashboard = () => {
       </header>
 
       <main
+        className="responsive-container"
         style={{
           padding: '30px',
           maxWidth: '1200px',
-          margin: '0 auto'
+          margin: '0 auto',
+          width: '100%',
+          boxSizing: 'border-box'
         }}
       >
         {/* Error */}
@@ -402,269 +477,192 @@ const CustomerDashboard = () => {
           </div>
         )}
 
-        {/* Verify Visit */}
+        {/* Active Loyalty Programs */}
         <section
           style={{
             backgroundColor: '#ffffff',
             padding: '24px',
             borderRadius: '12px',
-            border:
-              '1px solid #e5e7eb',
+            border: '1px solid #e5e7eb',
             marginBottom: '24px'
           }}
         >
           <h2
             style={{
-              marginTop: 0
+              marginTop: 0,
+              fontSize: '22px',
+              color: '#111827'
             }}
           >
-            Visit the Business
+            Active Loyalty Programs
           </h2>
 
-          <p
-            style={{
-              color: '#6b7280',
-              lineHeight: 1.6
-            }}
-          >
-            Scan the business QR code and
-            enter the current 6-digit PIN
-            provided by the staff to verify
-            your visit.
-          </p>
+          {activePrograms.length > 0 ? (
+            <>
+              {/* Primary Digital Loyalty Card - Show first program prominently */}
+              {(() => {
+                const primaryProgram = activePrograms[0];
+                const current = Number(primaryProgram.current_stamps ?? primaryProgram.current_progress ?? 0);
+                const required = Number(primaryProgram.stamps_required ?? 10);
+                const isUnlocked = current >= required;
+                
+                // Get business name from first stamp or profile
+                const businessName = stamps[0]?.business_name || 
+                                   stamps[0]?.tenant?.business_name || 
+                                   stamps[0]?.tenant?.name ||
+                                   profile?.full_name || 
+                                   'Your Business';
 
-          <p
-            style={{
-              marginBottom: '16px',
-              color: '#6b7280',
-              fontSize: '14px'
-            }}
-          >
-            Use your phone camera to scan the business QR code or click the button below to launch camera scanner / manual code entry.
-          </p>
+                return (
+                  <div style={{ marginBottom: '32px' }}>
+                    <DigitalLoyaltyCard
+                      businessName={businessName}
+                      programName={primaryProgram.name || 'Loyalty Program'}
+                      requiredStamps={required}
+                      currentStamps={current}
+                      rewardDescription={primaryProgram.reward_description || primaryProgram.reward_title || primaryProgram.name}
+                      isUnlocked={isUnlocked}
+                      isRedeemed={false}
+                    />
+                  </div>
+                );
+              })()}
 
-          <button
-            type="button"
-            onClick={() => navigate('/customer/verify')}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              backgroundColor: '#2563eb',
-              color: '#ffffff',
-              padding: '12px 24px',
-              borderRadius: '8px',
-              border: 'none',
-              fontWeight: '600',
-              fontSize: '15px',
-              cursor: 'pointer',
-              boxShadow: '0 2px 4px rgba(37,99,235,0.2)'
-            }}
-          >
-            📷 Scan Shop QR & Verify Visit
-          </button>
+              {/* Additional Programs List (if more than one) */}
+              {activePrograms.length > 1 && (
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+                    gap: '20px',
+                    marginTop: '16px'
+                  }}
+                >
+                  {activePrograms.slice(1).map((program, idx) => {
+                    const current = Number(program.current_stamps ?? program.current_progress ?? 0);
+                    const required = Number(program.stamps_required ?? 10);
+                    const remaining = Math.max(0, required - current);
+                    const isUnlocked = current >= required;
+                    const progressPct = Math.min(100, Math.round((current / required) * 100));
+
+                    return (
+                      <div
+                        key={program.id || `active-prog-${idx}`}
+                        style={{
+                          padding: '22px',
+                          borderRadius: '12px',
+                          border: '1px solid #e2e8f0',
+                          backgroundColor: '#ffffff',
+                          boxShadow: '0 2px 8px rgba(0,0,0,0.04)'
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                          <h3 style={{ margin: 0, fontSize: '18px', color: '#1e293b', fontWeight: '700' }}>
+                            {program.name || 'Loyalty Offer'}
+                          </h3>
+                          <span style={{ fontSize: '13px', fontWeight: '700', backgroundColor: '#eff6ff', color: '#1d4ed8', padding: '4px 10px', borderRadius: '6px' }}>
+                            {current} / {required} visits
+                          </span>
+                        </div>
+
+                        {/* Visual block progress */}
+                        <div style={{ fontFamily: 'monospace', fontSize: '17px', letterSpacing: '2px', color: '#2563eb', margin: '14px 0 10px', wordBreak: 'break-all' }}>
+                          {renderBlockProgress(current, required)}
+                        </div>
+
+                        {/* Progress Bar */}
+                        <div style={{ width: '100%', height: '10px', backgroundColor: '#f1f5f9', borderRadius: '999px', overflow: 'hidden', marginBottom: '14px' }}>
+                          <div style={{ width: `${progressPct}%`, height: '100%', backgroundColor: isUnlocked ? '#16a34a' : '#2563eb', borderRadius: '999px', transition: 'width 0.3s ease' }} />
+                        </div>
+
+                        {/* Remaining Visits / Unlock status */}
+                        <div style={{ fontWeight: '700', fontSize: '15px', color: isUnlocked ? '#166534' : '#1e293b', marginBottom: '16px' }}>
+                          {isUnlocked
+                            ? 'Reward Unlocked 🎉'
+                            : remaining === 1
+                            ? '1 more visit to unlock'
+                            : `${remaining} more visits to unlock`}
+                        </div>
+
+                        {/* Reward & Expiry */}
+                        <div style={{ paddingTop: '14px', borderTop: '1px dashed #e2e8f0', fontSize: '14px', color: '#475569', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          <div>
+                            <strong>Reward:</strong> {program.reward_title || program.reward_description || program.name}
+                          </div>
+                          {program.reward_description && program.reward_description !== program.reward_title && (
+                            <div style={{ fontSize: '13px', color: '#64748b' }}>
+                              {program.reward_description}
+                            </div>
+                          )}
+                          <div style={{ fontSize: '13px', color: '#64748b' }}>
+                            <strong>Valid until:</strong> {formatExpiryDate(program.end_date)}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          ) : (
+            <p style={{ color: '#6b7280' }}>No active loyalty programs available at this time.</p>
+          )}
         </section>
 
-        {/* Loyalty Card */}
-        <section
-          style={{
-            backgroundColor: '#ffffff',
-            padding: '24px',
-            borderRadius: '12px',
-            border:
-              '1px solid #e5e7eb',
-            marginBottom: '24px'
-          }}
-        >
-          <h2
+        {/* Expired Loyalty Programs */}
+        {expiredPrograms.length > 0 && (
+          <section
             style={{
-              marginTop: 0
+              backgroundColor: '#ffffff',
+              padding: '24px',
+              borderRadius: '12px',
+              border: '1px solid #e5e7eb',
+              marginBottom: '24px'
             }}
           >
-            My Loyalty Card
-          </h2>
-
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns:
-                'repeat(auto-fit, minmax(180px, 1fr))',
-              gap: '18px',
-              marginTop: '20px'
-            }}
-          >
-            <div
+            <h2
               style={{
-                padding: '20px',
-                borderRadius: '10px',
-                backgroundColor:
-                  '#f8fafc'
+                marginTop: 0,
+                fontSize: '18px',
+                color: '#6b7280'
               }}
             >
-              <p
-                style={{
-                  margin: 0,
-                  color: '#6b7280'
-                }}
-              >
-                Stamps Collected
-              </p>
-
-              <h3
-                style={{
-                  margin:
-                    '10px 0 0',
-                  fontSize: '30px'
-                }}
-              >
-                {currentStamps} /{' '}
-                {stampTarget}
-              </h3>
-            </div>
+              Expired Loyalty Programs
+            </h2>
 
             <div
               style={{
-                padding: '20px',
-                borderRadius: '10px',
-                backgroundColor:
-                  '#f8fafc'
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                gap: '16px',
+                marginTop: '14px'
               }}
             >
-              <p
-                style={{
-                  margin: 0,
-                  color: '#6b7280'
-                }}
-              >
-                Remaining
-              </p>
-
-              <h3
-                style={{
-                  margin:
-                    '10px 0 0',
-                  fontSize: '30px'
-                }}
-              >
-                {remainingStamps}
-              </h3>
+              {expiredPrograms.map((program, idx) => (
+                <div
+                  key={program.id || `expired-prog-${idx}`}
+                  style={{
+                    padding: '16px',
+                    borderRadius: '8px',
+                    border: '1px solid #f3f4f6',
+                    backgroundColor: '#f9fafb',
+                    color: '#6b7280'
+                  }}
+                >
+                  <h4 style={{ margin: '0 0 6px', color: '#374151', fontSize: '15px' }}>
+                    {program.name}
+                  </h4>
+                  <p style={{ margin: '0 0 4px', fontSize: '13px' }}>
+                    Final Progress: {program.current_stamps} / {program.stamps_required} visits
+                  </p>
+                  <span style={{ fontSize: '12px', color: '#9ca3af' }}>
+                    Expired: {formatExpiryDate(program.end_date)}
+                  </span>
+                </div>
+              ))}
             </div>
-
-            <div
-              style={{
-                padding: '20px',
-                borderRadius: '10px',
-                backgroundColor:
-                  '#f8fafc'
-              }}
-            >
-              <p
-                style={{
-                  margin: 0,
-                  color: '#6b7280'
-                }}
-              >
-                Rewards Redeemed
-              </p>
-
-              <h3
-                style={{
-                  margin:
-                    '10px 0 0',
-                  fontSize: '30px'
-                }}
-              >
-                {rewardsRedeemed}
-              </h3>
-            </div>
-
-            <div
-              style={{
-                padding: '20px',
-                borderRadius: '10px',
-                backgroundColor:
-                  '#f8fafc'
-              }}
-            >
-              <p
-                style={{
-                  margin: 0,
-                  color: '#6b7280'
-                }}
-              >
-                Progress
-              </p>
-
-              <h3
-                style={{
-                  margin:
-                    '10px 0 0',
-                  fontSize: '30px'
-                }}
-              >
-                {progress}%
-              </h3>
-            </div>
-          </div>
-
-          {/* Progress bar */}
-          <div
-            style={{
-              marginTop: '24px'
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                justifyContent:
-                  'space-between',
-                marginBottom: '8px',
-                fontSize: '14px'
-              }}
-            >
-              <span>
-                Loyalty Progress
-              </span>
-
-              <span>
-                {progress}%
-              </span>
-            </div>
-
-            <div
-              style={{
-                width: '100%',
-                height: '12px',
-                backgroundColor:
-                  '#e5e7eb',
-                borderRadius: '999px',
-                overflow: 'hidden'
-              }}
-            >
-              <div
-                style={{
-                  width: `${progress}%`,
-                  height: '100%',
-                  backgroundColor:
-                    '#2563eb',
-                  borderRadius:
-                    '999px',
-                  transition:
-                    'width 0.3s ease'
-                }}
-              />
-            </div>
-
-            <div style={{ marginTop: '16px', textAlign: 'center', fontWeight: 'bold', fontSize: '16px', color: remainingStamps === 0 ? '#166534' : '#1e293b' }}>
-              {remainingStamps > 1
-                ? `${remainingStamps} more visits to unlock your reward.`
-                : remainingStamps === 1
-                ? '1 more visit to unlock your reward.'
-                : 'Reward unlocked!'}
-            </div>
-          </div>
-        </section>
+          </section>
+        )}
 
         {/* Available Rewards */}
         <section

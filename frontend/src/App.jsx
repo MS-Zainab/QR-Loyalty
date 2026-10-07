@@ -9,6 +9,8 @@ const VerifyVisit = lazy(() => import('./pages/customer/VerifyVisit'));
 const StaffDashboard = lazy(() => import('./pages/staff/StaffDashboard'));
 const OwnerDashboard = lazy(() => import('./pages/owner/OwnerDashboard'));
 const AdminDashboard = lazy(() => import('./pages/admin/AdminDashboard'));
+const SlugRedirect = lazy(() => import('./pages/customer/SlugRedirect'));
+
 
 function App() {
   return (
@@ -94,7 +96,14 @@ function App() {
           />
         </Route>
 
+        {/* Branded slug QR redirect — public, no auth */}
+        <Route
+          path="/v/:slug"
+          element={<SlugRedirect />}
+        />
+
         {/* Unknown routes */}
+
         <Route
           path="*"
           element={

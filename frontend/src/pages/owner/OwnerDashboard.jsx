@@ -4,13 +4,20 @@ import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
 import QRCode from 'qrcode';
 import { logClientError } from '../../services/logging';
+import { copyToClipboard } from '../../utils/clipboard';
+import { theme, cardStyle } from '../../theme';
+import StatCard from '../../components/StatCard';
+import StatusBadge from '../../components/StatusBadge';
+import SectionCard from '../../components/SectionCard';
+import './OwnerDashboard.css';
 
 const OwnerDashboard = () => {
   const { session, profile, logout } = useAuth();
 
   const [dashboard, setDashboard] = useState(null);
   const [staff, setStaff] = useState([]);
-  const [loyalty, setLoyalty] = useState(null);
+  const [loyaltyPrograms, setLoyaltyPrograms] = useState([]);
+  const [editingProgram, setEditingProgram] = useState(null);
   const [rewards, setRewards] = useState([]);
   const [qr, setQr] = useState(null);
   const [qrImage, setQrImage] = useState('');
@@ -50,6 +57,12 @@ const OwnerDashboard = () => {
   const [selectedPlanForCheckout, setSelectedPlanForCheckout] = useState(null);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
 
+  // Branded slug (read-only, assigned by admin)
+  const [currentSlug, setCurrentSlug] = useState('');
+  const [copySuccess, setCopySuccess] = useState(false);
+
+
+
   const getConfig = (signal) => ({
     headers: {
       Authorization: `Bearer ${session?.access_token}`
@@ -83,7 +96,14 @@ const OwnerDashboard = () => {
           })
         ) ?? []
     });
+
+    // Pre-fill slug from tenant data if present
+    const tenantSlug = dashboardData?.tenant?.slug || '';
+    if (tenantSlug) {
+      setCurrentSlug(tenantSlug);
+    }
   };
+
 
   const loadStaff = async (signal) => {
     const response = await api.get(
@@ -109,13 +129,7 @@ const OwnerDashboard = () => {
     if (signal?.aborted) return;
 
     const data = response.data;
-    const programData =
-      data?.program ||
-      data?.loyalty ||
-      data?.loyalty_program ||
-      (data && typeof data === 'object' && data.id ? data : null);
-
-    setLoyalty(programData);
+    setLoyaltyPrograms(data?.programs || []);
   };
 
   const loadRewards = async (signal) => {
@@ -280,7 +294,8 @@ const OwnerDashboard = () => {
     loadedForUser.current = userId;
     setDashboard(null);
     setStaff([]);
-    setLoyalty(null);
+    setLoyaltyPrograms([]);
+    setEditingProgram(null);
     setRewards([]);
     setQr(null);
     setQrImage('');
@@ -426,6 +441,26 @@ const OwnerDashboard = () => {
     }
   };
 
+  const handleOpenCreateLoyalty = () => {
+    setError('');
+    setOnboardingSuccess('');
+    setEditingProgram(null);
+    setLoyaltyNameInput('');
+    setLoyaltyStampsInput(10);
+    setLoyaltyRewardInput('');
+    setShowLoyaltyModal(true);
+  };
+
+  const handleOpenEditLoyalty = (program) => {
+    setError('');
+    setOnboardingSuccess('');
+    setEditingProgram(program);
+    setLoyaltyNameInput(program?.name || '');
+    setLoyaltyStampsInput(program?.stamps_required ?? 10);
+    setLoyaltyRewardInput(program?.reward_description || '');
+    setShowLoyaltyModal(true);
+  };
+
   const handleSaveLoyalty = async (event) => {
     event.preventDefault();
     setError('');
@@ -445,29 +480,29 @@ const OwnerDashboard = () => {
     try {
       setLoyaltySaving(true);
 
-      if (loyalty?.id) {
+      const payload = {
+        name: loyaltyNameInput.trim(),
+        stamps_required: requiredStamps,
+        reward_description: loyaltyRewardInput.trim()
+      };
+
+      if (editingProgram?.id) {
         await api.patch(
-          `/loyalty/${loyalty.id}`,
-          {
-            name: loyaltyNameInput.trim(),
-            stamps_required: requiredStamps,
-            reward_description: loyaltyRewardInput.trim()
-          },
+          `/loyalty/${editingProgram.id}`,
+          payload,
           getConfig()
         );
       } else {
         await api.post(
           '/loyalty',
-          {
-            name: loyaltyNameInput.trim(),
-            stamps_required: requiredStamps
-          },
+          payload,
           getConfig()
         );
       }
 
       setOnboardingSuccess('Loyalty program saved successfully!');
       setShowLoyaltyModal(false);
+      setEditingProgram(null);
       await Promise.all([loadLoyalty(), loadDashboard()]);
     } catch (err) {
       logClientError('Save loyalty program failed', err);
@@ -481,22 +516,22 @@ const OwnerDashboard = () => {
     }
   };
 
-  const handleToggleLoyaltyStatus = async () => {
-    if (!loyalty?.id) return;
+  const handleToggleLoyaltyStatus = async (program) => {
+    if (!program?.id) return;
     setError('');
     setOnboardingSuccess('');
 
     try {
-      const nextStatus = !loyalty.is_active;
+      const nextStatus = program.is_active === false;
 
       await api.patch(
-        `/loyalty/${loyalty.id}`,
+        `/loyalty/${program.id}`,
         { is_active: nextStatus },
         getConfig()
       );
 
       setOnboardingSuccess(
-        `Loyalty program ${nextStatus ? 'activated' : 'deactivated'} successfully.`
+        `Loyalty program "${program.name || 'Program'}" ${nextStatus ? 'activated' : 'deactivated'} successfully.`
       );
       await Promise.all([loadLoyalty(), loadDashboard()]);
     } catch (err) {
@@ -548,15 +583,15 @@ const OwnerDashboard = () => {
   }
 
   return (
-    <div style={styles.page}>
+    <div className="owner-dashboard">
       {/* Header */}
-      <header style={styles.header}>
+      <header className="owner-header">
         <div>
-          <h1 style={styles.title}>
+          <h1 className="owner-title">
             Owner Dashboard
           </h1>
 
-          <p style={styles.subtitle}>
+          <p className="owner-subtitle">
             {dashboard?.tenant?.business_name ||
               dashboard?.tenant?.name ||
               profile?.business_name ||
@@ -567,7 +602,7 @@ const OwnerDashboard = () => {
         <button
           type="button"
           onClick={logout}
-          style={styles.logoutButton}
+          className="btn-danger"
         >
           Logout
         </button>
@@ -575,130 +610,41 @@ const OwnerDashboard = () => {
 
       {/* Error */}
       {error && (
-        <div style={styles.error}>
+        <div className="error-message">
           {error}
         </div>
       )}
 
       {/* Navigation */}
-      <nav style={styles.nav}>
-        <button
-          type="button"
-          onClick={() =>
-            setActiveSection('overview')
-          }
-          style={
-            activeSection === 'overview'
-              ? styles.navButtonActive
-              : styles.navButton
-          }
-        >
-          Overview
-        </button>
-
-        <button
-          type="button"
-          onClick={() =>
-            setActiveSection('loyalty')
-          }
-          style={
-            activeSection === 'loyalty'
-              ? styles.navButtonActive
-              : styles.navButton
-          }
-        >
-          Loyalty Program
-        </button>
-
-        <button
-          type="button"
-          onClick={() =>
-            setActiveSection('staff')
-          }
-          style={
-            activeSection === 'staff'
-              ? styles.navButtonActive
-              : styles.navButton
-          }
-        >
-          Staff
-        </button>
-
-        <button
-          type="button"
-          onClick={() =>
-            setActiveSection('rewards')
-          }
-          style={
-            activeSection === 'rewards'
-              ? styles.navButtonActive
-              : styles.navButton
-          }
-        >
-          Rewards
-        </button>
-
-        <button
-          type="button"
-          onClick={() =>
-            setActiveSection('qr')
-          }
-          style={
-            activeSection === 'qr'
-              ? styles.navButtonActive
-              : styles.navButton
-          }
-        >
-          QR Code
-        </button>
-
-        <button
-          type="button"
-          onClick={() =>
-            setActiveSection('analytics')
-          }
-          style={
-            activeSection === 'analytics'
-              ? styles.navButtonActive
-              : styles.navButton
-          }
-        >
-          Customer Analytics
-        </button>
-
-        <button
-          type="button"
-          onClick={() =>
-            setActiveSection('reports')
-          }
-          style={
-            activeSection === 'reports'
-              ? styles.navButtonActive
-              : styles.navButton
-          }
-        >
-          Reports
-        </button>
-
-        <button
-          type="button"
-          onClick={() =>
-            setActiveSection('subscription')
-          }
-          style={
-            activeSection === 'subscription'
-              ? styles.navButtonActive
-              : styles.navButton
-          }
-        >
-          Subscription & Plan
-        </button>
+      <nav className="owner-nav">
+        {[
+          ['overview', 'Overview'],
+          ['loyalty', 'Loyalty Programs'],
+          ['staff', 'Staff'],
+          ['rewards', 'Rewards'],
+          ['qr', 'QR Code'],
+          ['analytics', 'Customer Analytics'],
+          ['reports', 'Reports'],
+          ['subscription', 'Subscription & Plan']
+        ].map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setActiveSection(key)}
+            className={`nav-tab ${activeSection === key ? 'active' : ''}`}
+          >
+            {label}
+          </button>
+        ))}
       </nav>
+
+      {/* Main Content */}
+      <main className="owner-main">
 
       {/* Overview */}
       {activeSection === 'overview' && (
-        <section>
-          <div style={styles.grid}>
+        <section className="owner-section">
+          <div className="stats-grid">
             <StatCard
               title="Active Customers"
               value={
@@ -707,6 +653,8 @@ const OwnerDashboard = () => {
                   ?.active_customers ??
                 0
               }
+              icon="👥"
+              color="primary"
             />
 
             <StatCard
@@ -717,6 +665,8 @@ const OwnerDashboard = () => {
                   ?.total_stamps ??
                 0
               }
+              icon="⭐"
+              color="reward"
             />
 
             <StatCard
@@ -727,6 +677,8 @@ const OwnerDashboard = () => {
                   ?.total_rewards ??
                 0
               }
+              icon="🎁"
+              color="reward"
             />
 
             <StatCard
@@ -737,6 +689,8 @@ const OwnerDashboard = () => {
                   ?.active_rewards ??
                 0
               }
+              icon="✓"
+              color="success"
             />
 
             <StatCard
@@ -747,6 +701,8 @@ const OwnerDashboard = () => {
                   ?.total_redemptions ??
                 0
               }
+              icon="✓"
+              color="success"
             />
 
             <StatCard
@@ -757,66 +713,53 @@ const OwnerDashboard = () => {
                   ?.active_staff ??
                 0
               }
+              icon="👤"
+              color="primary"
             />
           </div>
 
-          <div style={styles.card}>
-            <h2 style={styles.sectionTitle}>
-              Business Information
-            </h2>
-
-            <div style={styles.infoGrid}>
-              <InfoItem
-                label="Business"
-                value={
-                  dashboard?.tenant
+          <SectionCard title="Business Information">
+            <div className="info-grid">
+              <div className="info-item">
+                <div className="info-label">Business</div>
+                <div className="info-value">
+                  {dashboard?.tenant
                     ?.business_name ||
                   dashboard?.tenant?.name ||
-                  '-'
-                }
-              />
+                  '-'}
+                </div>
+              </div>
 
-              <InfoItem
-                label="Status"
-                value={
-                  dashboard?.tenant?.status ||
-                  '-'
-                }
-              />
+              <div className="info-item">
+                <div className="info-label">Status</div>
+                <div className="info-value">
+                  <StatusBadge status={dashboard?.tenant?.status || 'unknown'} />
+                </div>
+              </div>
 
-              <InfoItem
-                label="Owner"
-                value={
-                  profile?.full_name ||
+              <div className="info-item">
+                <div className="info-label">Owner</div>
+                <div className="info-value">
+                  {profile?.full_name ||
                   profile?.email ||
-                  '-'
-                }
-              />
+                  '-'}
+                </div>
+              </div>
             </div>
-          </div>
+          </SectionCard>
 
-          <div style={styles.card}>
-            <h2 style={styles.sectionTitle}>
-              Staff Activity
-            </h2>
-
+          <SectionCard title="Staff Activity">
             {dashboard?.staff_activity
               ?.length > 0 ? (
-              <div
-                style={
-                  styles.tableWrapper
-                }
-              >
-                <table
-                  style={styles.table}
-                >
+              <div className="table-wrapper">
+                <table className="owner-table">
                   <thead>
                     <tr>
-                      <th style={styles.th}>
+                      <th style={{ textAlign: 'left', padding: '14px', borderBottom: '2px solid #e2e8f0', fontWeight: '600', color: '#475569', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.05em', backgroundColor: '#f8fafc' }}>
                         Staff
                       </th>
 
-                      <th style={styles.th}>
+                      <th style={{ textAlign: 'left', padding: '14px', borderBottom: '2px solid #e2e8f0', fontWeight: '600', color: '#475569', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.05em', backgroundColor: '#f8fafc' }}>
                         Stamps Issued
                       </th>
 
@@ -883,11 +826,11 @@ const OwnerDashboard = () => {
                 </table>
               </div>
             ) : (
-              <p style={styles.empty}>
+              <p className="empty-state-text">
                 No staff activity available.
               </p>
             )}
-          </div>
+          </SectionCard>
         </section>
       )}
 
@@ -896,80 +839,139 @@ const OwnerDashboard = () => {
         <section style={styles.card}>
           <div style={styles.sectionHeaderRow}>
             <h2 style={styles.sectionTitle}>
-              Loyalty Program
+              Loyalty Programs
             </h2>
 
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button
-                type="button"
-                onClick={() => {
-                  setError('');
-                  setOnboardingSuccess('');
-                  setLoyaltyNameInput(loyalty?.name || '');
-                  setLoyaltyStampsInput(loyalty?.stamps_required ?? 10);
-                  setLoyaltyRewardInput(loyalty?.reward_description || '');
-                  setShowLoyaltyModal(true);
-                }}
-                style={styles.primaryButton}
-              >
-                {loyalty ? 'Edit Loyalty Program' : '+ Create Loyalty Program'}
-              </button>
-
-              {loyalty && (
-                <button
-                  type="button"
-                  onClick={handleToggleLoyaltyStatus}
-                  style={loyalty.is_active !== false ? styles.deactivateButton : styles.primaryButton}
-                >
-                  {loyalty.is_active !== false ? 'Deactivate Program' : 'Activate Program'}
-                </button>
-              )}
-            </div>
+            <button
+              type="button"
+              onClick={handleOpenCreateLoyalty}
+              style={styles.primaryButton}
+            >
+              + Create Loyalty Program
+            </button>
           </div>
 
-          {loyalty ? (
-            <div>
-              <div style={styles.infoGrid}>
-                <InfoItem
-                  label="Program Name"
-                  value={
-                    loyalty.name ||
-                    loyalty.program_name ||
-                    '-'
-                  }
-                />
+          {onboardingSuccess && (
+            <div style={styles.success}>
+              {onboardingSuccess}
+            </div>
+          )}
 
-                <InfoItem
-                  label="Required Stamps"
-                  value={
-                    loyalty.stamps_required ??
-                    loyalty.required_stamps ??
-                    0
-                  }
-                />
+          {loyaltyPrograms.length > 0 ? (
+            <div style={styles.tableWrapper}>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>
+                      Program Name
+                    </th>
 
-                <InfoItem
-                  label="Reward"
-                  value={
-                    loyalty.reward_description ||
-                    loyalty.reward ||
-                    '-'
-                  }
-                />
+                    <th style={styles.th}>
+                      Required Stamps
+                    </th>
 
-                <InfoItem
-                  label="Status"
-                  value={
-                    <span style={loyalty.is_active !== false ? styles.activeBadge : styles.inactiveBadge}>
-                      {loyalty.is_active !== false ? 'Active' : 'Inactive'}
-                    </span>
-                  }
-                />
-              </div>
+                    <th style={styles.th}>
+                      Reward
+                    </th>
+
+                    <th style={styles.th}>
+                      Status
+                    </th>
+
+                    <th style={styles.th}>
+                      Created
+                    </th>
+
+                    <th style={styles.th}>
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {loyaltyPrograms.map(
+                    (program) => (
+                      <tr
+                        key={program.id}
+                      >
+                        <td
+                          style={styles.td}
+                        >
+                          {program.name ||
+                            program.program_name ||
+                            '-'}
+                        </td>
+
+                        <td
+                          style={styles.td}
+                        >
+                          {program.stamps_required ??
+                            program.required_stamps ??
+                            0}
+                        </td>
+
+                        <td
+                          style={styles.td}
+                        >
+                          {program.reward_description ||
+                            program.reward ||
+                            '-'}
+                        </td>
+
+                        <td
+                          style={styles.td}
+                        >
+                          <span style={program.is_active !== false ? styles.activeBadge : styles.inactiveBadge}>
+                            {program.is_active !== false ? 'Active' : 'Inactive'}
+                          </span>
+                        </td>
+
+                        <td
+                          style={styles.td}
+                        >
+                          {formatDate(program.created_at)}
+                        </td>
+
+                        <td
+                          style={styles.td}
+                        >
+                          <div style={styles.actionRow}>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleOpenEditLoyalty(program)
+                              }
+                              style={styles.secondaryButton}
+                            >
+                              Edit
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleToggleLoyaltyStatus(program)
+                              }
+                              style={
+                                program.is_active !== false
+                                  ? styles.deactivateButton
+                                  : styles.actionButton
+                              }
+                            >
+                              {program.is_active !== false
+                                ? 'Deactivate'
+                                : 'Activate'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  )}
+                </tbody>
+              </table>
             </div>
           ) : (
             <p style={styles.empty}>
-              No loyalty program found. Click "+ Create Loyalty Program" to configure your customer rewards rules.
+              No loyalty programs found. Click '+ Create Loyalty Program' to configure your first customer reward.
             </p>
           )}
 
@@ -977,8 +979,12 @@ const OwnerDashboard = () => {
           {showLoyaltyModal && (
             <div style={styles.modalOverlay}>
               <div style={styles.modalContent}>
-                <h3 style={styles.modalTitle}>{loyalty ? 'Edit Loyalty Program' : 'Create Loyalty Program'}</h3>
-                <p style={styles.modalSubtitle}>Configure your stamp target and reward rules for customers.</p>
+                <h3 style={styles.modalTitle}>{editingProgram ? 'Edit Loyalty Program' : 'Create Loyalty Program'}</h3>
+                <p style={styles.modalSubtitle}>
+                  {editingProgram
+                    ? `Update the stamp target and reward rules for "${editingProgram.name || 'this program'}".`
+                    : 'Configure your stamp target and reward rules for customers.'}
+                </p>
 
                 <form onSubmit={handleSaveLoyalty} style={styles.form}>
                   <div style={styles.formGroup}>
@@ -1020,7 +1026,10 @@ const OwnerDashboard = () => {
                   <div style={styles.modalActions}>
                     <button
                       type="button"
-                      onClick={() => setShowLoyaltyModal(false)}
+                      onClick={() => {
+                        setShowLoyaltyModal(false);
+                        setEditingProgram(null);
+                      }}
                       style={styles.cancelButton}
                     >
                       Cancel
@@ -1030,7 +1039,7 @@ const OwnerDashboard = () => {
                       disabled={loyaltySaving}
                       style={styles.primaryButton}
                     >
-                      {loyaltySaving ? 'Saving...' : 'Save Loyalty Program'}
+                      {loyaltySaving ? 'Saving...' : editingProgram ? 'Save Changes' : 'Create Loyalty Program'}
                     </button>
                   </div>
                 </form>
@@ -1474,7 +1483,63 @@ const OwnerDashboard = () => {
         </section>
       )}
 
+      {/* Branded Slug / Short Link */}
+      {activeSection === 'qr' && (
+        <section style={{ ...styles.card, marginTop: '20px' }}>
+          <h2 style={styles.sectionTitle}>Your Customer URL</h2>
+          <p style={{ color: '#6b7280', marginBottom: '16px', lineHeight: 1.6 }}>
+            This is your unique branded link. Share it with customers or use it in your QR codes.
+            Customers who visit this URL will be automatically redirected to your verification page.
+          </p>
+
+          {currentSlug ? (
+            <div style={{
+              backgroundColor: '#eff6ff',
+              border: '1px solid #bfdbfe',
+              borderRadius: '8px',
+              padding: '14px 16px'
+            }}>
+              <div style={{ fontSize: '13px', color: '#1e40af', fontWeight: '600', marginBottom: '8px' }}>
+                Branded Customer URL:
+              </div>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <code style={{ fontSize: '14px', color: '#1e293b', wordBreak: 'break-all', flex: 1 }}>
+                  {window.location.origin}/v/{currentSlug}
+                </code>
+                <button
+                  onClick={async () => {
+                    const success = await copyToClipboard(`${window.location.origin}/v/${currentSlug}`);
+                    if (success) {
+                      setCopySuccess(true);
+                      setTimeout(() => setCopySuccess(false), 2000);
+                    }
+                  }}
+                  style={{
+                    padding: '8px 16px',
+                    border: 'none',
+                    borderRadius: '6px',
+                    backgroundColor: copySuccess ? '#16a34a' : '#2563eb',
+                    color: '#ffffff',
+                    cursor: 'pointer',
+                    fontWeight: '600',
+                    fontSize: '13px',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {copySuccess ? 'Copied!' : 'Copy URL'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <p style={{ color: '#9ca3af', fontStyle: 'italic' }}>
+              No branded URL has been assigned yet. Please contact your administrator.
+            </p>
+          )}
+        </section>
+      )}
+
       {/* Customer Analytics */}
+
       {activeSection === 'analytics' && (
         <section>
           <div style={styles.grid}>
@@ -1763,23 +1828,7 @@ const OwnerDashboard = () => {
           )}
         </section>
       )}
-    </div>
-  );
-};
-
-const StatCard = ({
-  title,
-  value
-}) => {
-  return (
-    <div style={styles.statCard}>
-      <p style={styles.statTitle}>
-        {title}
-      </p>
-
-      <h2 style={styles.statValue}>
-        {value}
-      </h2>
+      </main>
     </div>
   );
 };

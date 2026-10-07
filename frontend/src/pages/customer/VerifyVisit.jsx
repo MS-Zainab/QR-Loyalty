@@ -21,6 +21,7 @@ const VerifyVisit = () => {
   const [phoneNumber, setPhoneNumber] = useState('');
   const [pin, setPin] = useState('');
   const [verifying, setVerifying] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -142,6 +143,46 @@ const VerifyVisit = () => {
     return fallback;
   };
 
+  const handleLoginSubmit = async (event) => {
+    event.preventDefault();
+    setError('');
+    setSuccess('');
+
+    if (!fullName.trim()) {
+      setError('Please enter your full name.');
+      return;
+    }
+    if (!phoneNumber.trim()) {
+      setError('Please enter your phone number.');
+      return;
+    }
+
+    const cleanedPhone = phoneNumber.replace(/[\s\-\.\(\)]/g, '').trim();
+    const isPkValid = /^(?:\+?92|0)?3\d{9}$/.test(cleanedPhone);
+    const isIntlValid = /^\+?\d{10,15}$/.test(cleanedPhone);
+
+    if (!isPkValid && !isIntlValid) {
+      setError('Please provide a valid phone number (e.g. 03XXXXXXXXX or +923XXXXXXXXX)');
+      return;
+    }
+
+    try {
+      setLoggingIn(true);
+      await customerLogin(fullName.trim(), phoneNumber.trim());
+      // Step advances automatically because `session` and `profile` become truthy
+    } catch (err) {
+      logClientError('Customer login failed', err);
+      setError(
+        err?.response?.data?.message ||
+        err?.response?.data?.error ||
+        err?.message ||
+        'Failed to save customer details. Please try again.'
+      );
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
   const handleVerify = async (event) => {
     event.preventDefault();
 
@@ -155,53 +196,20 @@ const VerifyVisit = () => {
       return;
     }
 
-    const isCustomerAuthenticated = Boolean(session && profile);
-
-    if (!isCustomerAuthenticated) {
-      if (!fullName.trim()) {
-        setError('Please enter your full name.');
-        return;
-      }
-      if (!phoneNumber.trim()) {
-        setError('Please enter your phone number.');
-        return;
-      }
-
-      // Phone validation (Pakistan format 03XXXXXXXXX or +923XXXXXXXXX, or standard international)
-      const cleanedPhone = phoneNumber.replace(/[\s\-\.\(\)]/g, '').trim();
-      const isPkValid = /^(?:\+?92|0)?3\d{9}$/.test(cleanedPhone);
-      const isIntlValid = /^\+?\d{10,15}$/.test(cleanedPhone);
-
-      if (!isPkValid && !isIntlValid) {
-        setError('Please provide a valid phone number (e.g. 03XXXXXXXXX or +923XXXXXXXXX)');
-        return;
-      }
-    }
-
     if (!pin.trim()) {
-      setError(
-        'Please enter the 6-digit staff PIN.'
-      );
+      setError('Please enter the 6-digit staff PIN.');
       return;
     }
 
     if (!/^\d{6}$/.test(pin.trim())) {
-      setError(
-        'Staff PIN must be exactly 6 digits.'
-      );
+      setError('Staff PIN must be exactly 6 digits.');
       return;
     }
 
     try {
       setVerifying(true);
-      let authSession = session;
+      const token = session?.access_token;
 
-      if (!isCustomerAuthenticated) {
-        const loginResult = await customerLogin(fullName.trim(), phoneNumber.trim());
-        authSession = loginResult?.session;
-      }
-
-      const token = authSession?.access_token;
       const response = await api.post(
         '/verification/verify',
         {
@@ -579,32 +587,11 @@ const VerifyVisit = () => {
             </div>
           )}
 
-          <form
-            onSubmit={handleVerify}
-            style={{
-              marginTop: '16px'
-            }}
-          >
-            {session && profile ? (
-              <div style={{ marginBottom: '18px', padding: '12px 14px', backgroundColor: '#eff6ff', borderRadius: '8px', border: '1px solid #bfdbfe' }}>
-                <span style={{ fontSize: '13px', color: '#1e40af', fontWeight: '600' }}>
-                  Member Check-in:
-                </span>{' '}
-                <strong style={{ color: '#1e293b' }}>{profile.full_name || 'Customer'}</strong>
-              </div>
-            ) : (
+          {!(session && profile) ? (
+            <form onSubmit={handleLoginSubmit} style={{ marginTop: '16px' }}>
               <div style={{ marginBottom: '18px' }}>
                 <div style={{ marginBottom: '14px' }}>
-                  <label
-                    htmlFor="customer-name"
-                    style={{
-                      display: 'block',
-                      marginBottom: '6px',
-                      fontWeight: '600',
-                      fontSize: '14px',
-                      color: '#334155'
-                    }}
-                  >
+                  <label htmlFor="customer-name" style={{ display: 'block', marginBottom: '6px', fontWeight: '600', fontSize: '14px', color: '#334155' }}>
                     Your Name
                   </label>
                   <input
@@ -617,28 +604,12 @@ const VerifyVisit = () => {
                       setError('');
                     }}
                     placeholder="Enter your full name"
-                    style={{
-                      width: '100%',
-                      boxSizing: 'border-box',
-                      padding: '11px 14px',
-                      border: '1px solid #cbd5e1',
-                      borderRadius: '8px',
-                      fontSize: '15px'
-                    }}
+                    style={{ width: '100%', boxSizing: 'border-box', padding: '11px 14px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '15px' }}
                   />
                 </div>
 
                 <div style={{ marginBottom: '14px' }}>
-                  <label
-                    htmlFor="customer-phone"
-                    style={{
-                      display: 'block',
-                      marginBottom: '6px',
-                      fontWeight: '600',
-                      fontSize: '14px',
-                      color: '#334155'
-                    }}
-                  >
+                  <label htmlFor="customer-phone" style={{ display: 'block', marginBottom: '6px', fontWeight: '600', fontSize: '14px', color: '#334155' }}>
                     Phone Number
                   </label>
                   <input
@@ -651,109 +622,76 @@ const VerifyVisit = () => {
                       setError('');
                     }}
                     placeholder="03XXXXXXXXX or +923XXXXXXXXX"
-                    style={{
-                      width: '100%',
-                      boxSizing: 'border-box',
-                      padding: '11px 14px',
-                      border: '1px solid #cbd5e1',
-                      borderRadius: '8px',
-                      fontSize: '15px'
-                    }}
+                    style={{ width: '100%', boxSizing: 'border-box', padding: '11px 14px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '15px' }}
                   />
                   <span style={{ fontSize: '12px', color: '#64748b', marginTop: '4px', display: 'block' }}>
                     Pakistan mobile format: 03001234567 or +923001234567
                   </span>
                 </div>
               </div>
-            )}
 
-            <label
-              htmlFor="staff-pin"
-              style={{
-                display: 'block',
-                marginBottom: '8px',
-                fontWeight: '600'
-              }}
-            >
-              Staff Verification PIN
-            </label>
+              <button
+                type="submit"
+                disabled={loggingIn || !qrCode}
+                style={{
+                  width: '100%', marginTop: '12px', padding: '13px 20px', border: 'none', borderRadius: '8px',
+                  backgroundColor: loggingIn || !qrCode ? '#9ca3af' : '#2563eb',
+                  color: '#ffffff', cursor: loggingIn || !qrCode ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '16px'
+                }}
+              >
+                {loggingIn ? 'Continuing...' : 'Continue'}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleVerify} style={{ marginTop: '16px' }}>
+              <div style={{ marginBottom: '18px', padding: '12px 14px', backgroundColor: '#eff6ff', borderRadius: '8px', border: '1px solid #bfdbfe' }}>
+                <span style={{ fontSize: '13px', color: '#1e40af', fontWeight: '600' }}>
+                  Member Check-in:
+                </span>{' '}
+                <strong style={{ color: '#1e293b' }}>{profile.full_name || 'Customer'}</strong>
+              </div>
 
-            <input
-              id="staff-pin"
-              type="text"
-              inputMode="numeric"
-              maxLength={6}
-              autoComplete="off"
-              value={pin}
-              onChange={(event) => {
-                const value =
-                  event.target.value.replace(
-                    /\D/g,
-                    ''
-                  );
+              <label htmlFor="staff-pin" style={{ display: 'block', marginBottom: '8px', fontWeight: '600' }}>
+                Staff Verification PIN
+              </label>
 
-                setPin(value.slice(0, 6));
-                setError('');
-                setSuccess('');
-              }}
-              placeholder="Enter 6-digit PIN"
-              style={{
-                width: '100%',
-                boxSizing: 'border-box',
-                padding: '13px 14px',
-                border:
-                  '1px solid #d1d5db',
-                borderRadius: '8px',
-                fontSize: '18px',
-                letterSpacing: '4px',
-                textAlign: 'center'
-              }}
-            />
+              <input
+                id="staff-pin"
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                autoComplete="off"
+                value={pin}
+                onChange={(event) => {
+                  const value = event.target.value.replace(/\D/g, '');
+                  setPin(value.slice(0, 6));
+                  setError('');
+                  setSuccess('');
+                }}
+                placeholder="Enter 6-digit PIN"
+                style={{
+                  width: '100%', boxSizing: 'border-box', padding: '13px 14px', border: '1px solid #d1d5db',
+                  borderRadius: '8px', fontSize: '18px', letterSpacing: '4px', textAlign: 'center'
+                }}
+              />
 
-            <p
-              style={{
-                fontSize: '14px',
-                color: '#6b7280',
-                marginTop: '8px'
-              }}
-            >
-              Ask the shop staff for the
-              current 6-digit PIN. It is
-              valid for 60 seconds.
-            </p>
+              <p style={{ fontSize: '14px', color: '#6b7280', marginTop: '8px' }}>
+                Ask the shop staff for the current 6-digit PIN. It is valid for 60 seconds.
+              </p>
 
-            <button
-              type="submit"
-              disabled={
-                verifying ||
-                !qrCode
-              }
-              style={{
-                width: '100%',
-                marginTop: '12px',
-                padding: '13px 20px',
-                border: 'none',
-                borderRadius: '8px',
-                backgroundColor:
-                  verifying ||
-                  !qrCode
-                    ? '#9ca3af'
-                    : '#2563eb',
-                color: '#ffffff',
-                cursor:
-                  verifying ||
-                  !qrCode
-                    ? 'not-allowed'
-                    : 'pointer',
-                fontWeight: '600',
-                fontSize: '16px'
-              }}
-            >
-              {verifying
-                ? 'Verifying...'
-                : 'Verify Visit'}
-            </button>
-          </form>
+              <button
+                type="submit"
+                disabled={verifying || !qrCode}
+                style={{
+                  width: '100%', marginTop: '12px', padding: '13px 20px', border: 'none', borderRadius: '8px',
+                  backgroundColor: verifying || !qrCode ? '#9ca3af' : '#2563eb',
+                  color: '#ffffff', cursor: verifying || !qrCode ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '16px'
+                }}
+              >
+                {verifying ? 'Verifying...' : 'Verify Visit'}
+              </button>
+            </form>
+          )}
         </section>
       </main>
     </div>

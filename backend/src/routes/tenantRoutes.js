@@ -5,6 +5,44 @@ const { requireRole } = require('../middleware/role');
 const { isUuid } = require('../middleware/validation');
 const supabaseAdmin = require('../config/supabaseAdmin');
 
+/**
+ * Generate a URL-friendly slug from business name, ensuring uniqueness.
+ */
+async function generateUniqueSlug(businessName) {
+  // Lowercase, replace spaces/special chars with hyphens, remove invalid chars
+  let baseSlug = businessName
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 60);
+
+  if (baseSlug.length < 2) {
+    baseSlug = `tenant-${Date.now().toString(36)}`;
+  }
+
+  // Check uniqueness; append -2, -3, etc. if taken
+  let candidate = baseSlug;
+  let suffix = 1;
+
+  while (true) {
+    const { data: existing } = await supabaseAdmin
+      .from('tenants')
+      .select('id')
+      .eq('slug', candidate)
+      .maybeSingle();
+
+    if (!existing) {
+      return candidate;
+    }
+
+    suffix += 1;
+    const numbered = `${baseSlug}-${suffix}`;
+    // Ensure we don't exceed 60 chars
+    candidate = numbered.length <= 60 ? numbered : numbered.slice(0, 60).replace(/-$/, '');
+  }
+}
+
 const router = express.Router();
 
 /**
@@ -47,7 +85,7 @@ router.post(
   requireRole('admin'),
   async (req, res) => {
     try {
-      const { business_name } = req.body;
+      const { business_name, slug: providedSlug } = req.body;
 
       if (!business_name || !business_name.trim()) {
         return res.status(400).json({
@@ -56,11 +94,53 @@ router.post(
         });
       }
 
+      let finalSlug;
+
+      // If admin provided a custom slug, validate and use it
+      if (providedSlug && typeof providedSlug === 'string') {
+        const trimmedSlug = providedSlug.trim();
+
+        // Validate format
+        if (!/^[a-z0-9-]{2,60}$/.test(trimmedSlug)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid slug format. Must be 2-60 characters with lowercase letters, digits, and hyphens only.'
+          });
+        }
+
+        if (trimmedSlug.startsWith('-') || trimmedSlug.endsWith('-')) {
+          return res.status(400).json({
+            success: false,
+            message: 'Slug cannot start or end with a hyphen.'
+          });
+        }
+
+        // Check uniqueness
+        const { data: existing } = await supabaseAdmin
+          .from('tenants')
+          .select('id')
+          .eq('slug', trimmedSlug)
+          .maybeSingle();
+
+        if (existing) {
+          return res.status(400).json({
+            success: false,
+            message: 'This slug is already in use by another vendor.'
+          });
+        }
+
+        finalSlug = trimmedSlug;
+      } else {
+        // Auto-generate unique slug from business name as fallback
+        finalSlug = await generateUniqueSlug(business_name.trim());
+      }
+
       const { data: tenant, error } = await supabaseAdmin
         .from('tenants')
         .insert({
           business_name: business_name.trim(),
-          status: 'active'
+          status: 'active',
+          slug: finalSlug
         })
         .select()
         .single();
@@ -90,7 +170,8 @@ router.post(
       return res.status(201).json({
         success: true,
         message: 'Vendor created successfully',
-        tenant
+        tenant,
+        slug: tenant.slug
       });
     } catch (error) {
       console.error('Create tenant error:', error);
@@ -131,7 +212,7 @@ router.get(
     try {
       const { data: tenants, error } = await supabaseAdmin
         .from('tenants')
-        .select('id, business_name, status, created_at, updated_at')
+        .select('id, business_name, status, created_at, updated_at, slug')
         .order('created_at', { ascending: false });
 
       if (error) {
@@ -260,6 +341,146 @@ router.patch(
       return res.status(500).json({
         success: false,
         message: 'Server error while updating vendor status'
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/tenants/{id}/slug:
+ *   patch:
+ *     summary: Update tenant branded slug
+ *     description: Allows platform administrators to set or update a tenant's branded slug for customer-facing URLs. Validates uniqueness and format.
+ *     tags:
+ *       - Tenants
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: Vendor/tenant UUID
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - slug
+ *             properties:
+ *               slug:
+ *                 type: string
+ *                 minLength: 2
+ *                 maxLength: 60
+ *                 pattern: '^[a-z0-9][a-z0-9-]*[a-z0-9]$'
+ *                 example: test-cafe
+ *     responses:
+ *       200:
+ *         description: Tenant slug updated successfully
+ *       400:
+ *         description: Invalid slug format or duplicate slug
+ *       401:
+ *         description: Authentication required or token is invalid/expired
+ *       403:
+ *         description: Admin role required
+ *       404:
+ *         description: Tenant not found
+ *       500:
+ *         description: Server error while updating slug
+ */
+router.patch(
+  '/:id/slug',
+  requireAuth,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { slug } = req.body;
+
+      if (!isUuid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid tenant ID is required'
+        });
+      }
+
+      // Validate slug format
+      if (!slug || typeof slug !== 'string') {
+        return res.status(400).json({
+          success: false,
+          message: 'Slug is required'
+        });
+      }
+
+      const trimmedSlug = slug.trim();
+
+      // Check format: lowercase letters, digits, hyphens only, 2-60 chars
+      if (!/^[a-z0-9-]{2,60}$/.test(trimmedSlug)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Slug must be 2-60 characters, containing only lowercase letters, digits, and hyphens'
+        });
+      }
+
+      // Cannot start or end with hyphen
+      if (trimmedSlug.startsWith('-') || trimmedSlug.endsWith('-')) {
+        return res.status(400).json({
+          success: false,
+          message: 'Slug cannot start or end with a hyphen'
+        });
+      }
+
+      // Check uniqueness (excluding current tenant)
+      const { data: existingTenant } = await supabaseAdmin
+        .from('tenants')
+        .select('id')
+        .eq('slug', trimmedSlug)
+        .neq('id', id)
+        .maybeSingle();
+
+      if (existingTenant) {
+        return res.status(400).json({
+          success: false,
+          message: 'This slug is already in use by another vendor'
+        });
+      }
+
+      // Update the tenant slug
+      const { data: tenant, error } = await supabaseAdmin
+        .from('tenants')
+        .update({
+          slug: trimmedSlug,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', id)
+        .select('id, business_name, slug, status')
+        .single();
+
+      if (error) {
+        console.error('Update tenant slug error:', error);
+
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to update tenant slug'
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Tenant slug updated successfully',
+        tenant
+      });
+    } catch (error) {
+      console.error('Update tenant slug error:', error);
+
+      return res.status(500).json({
+        success: false,
+        message: 'Server error while updating slug'
       });
     }
   }
@@ -579,7 +800,9 @@ router.post(
         });
       }
 
-      // Create staff table operational record
+      // Create staff table operational record. Without this row the staff
+      // member cannot generate verification PINs, so a failure here must
+      // roll back the whole creation instead of only logging.
       const { data: staffRecord, error: staffRecordError } = await supabaseAdmin
         .from('staff')
         .insert({
@@ -590,8 +813,23 @@ router.post(
         .select()
         .single();
 
-      if (staffRecordError) {
+      if (staffRecordError || !staffRecord) {
         console.error('Create staff table record error:', staffRecordError);
+
+        // Roll back the profile and auth user so no half-created staff remains
+        await supabaseAdmin
+          .from('profiles')
+          .delete()
+          .eq('id', profile.id)
+          .catch(() => {});
+        await supabaseAdmin.auth.admin
+          .deleteUser(authData.user.id)
+          .catch(() => {});
+
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create staff operational record'
+        });
       }
 
       return res.status(201).json({
@@ -611,6 +849,107 @@ router.post(
       return res.status(500).json({
         success: false,
         message: 'Server error while creating vendor staff'
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/tenants/slug/{slug}:
+ *   get:
+ *     summary: Resolve tenant slug to active QR code
+ *     description: Public endpoint. Looks up a tenant by its branded slug and returns the active QR code identifier so the customer verification page can be pre-filled. No authentication required.
+ *     tags:
+ *       - Tenants
+ *     parameters:
+ *       - in: path
+ *         name: slug
+ *         required: true
+ *         description: Tenant branded slug (e.g. coffee-house)
+ *         schema:
+ *           type: string
+ *           example: coffee-house
+ *     responses:
+ *       200:
+ *         description: Slug resolved successfully
+ *       400:
+ *         description: Invalid slug format
+ *       404:
+ *         description: Tenant or active QR code not found
+ *       500:
+ *         description: Server error
+ */
+router.get(
+  '/slug/:slug',
+  async (req, res) => {
+    try {
+      const { slug } = req.params;
+
+      // Validate slug format: lowercase letters, digits, hyphens only, 2–60 chars
+      if (!/^[a-z0-9-]{2,60}$/.test(slug)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid slug format'
+        });
+      }
+
+      // Find active tenant with this slug
+      const { data: tenant, error: tenantError } = await supabaseAdmin
+        .from('tenants')
+        .select('id, business_name, status')
+        .eq('slug', slug)
+        .eq('status', 'active')
+        .maybeSingle();
+
+      if (tenantError) {
+        console.error('Slug tenant lookup error:', tenantError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to resolve slug'
+        });
+      }
+
+      if (!tenant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Business not found or is not currently active'
+        });
+      }
+
+      // Find the active QR code for this tenant
+      const { data: qrRecord, error: qrError } = await supabaseAdmin
+        .from('qr_codes')
+        .select('code')
+        .eq('tenant_id', tenant.id)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (qrError) {
+        console.error('Slug QR lookup error:', qrError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to retrieve QR code'
+        });
+      }
+
+      if (!qrRecord) {
+        return res.status(404).json({
+          success: false,
+          message: 'No active QR code found for this business'
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        business_name: tenant.business_name,
+        qr_code: qrRecord.code
+      });
+    } catch (error) {
+      console.error('Slug resolution error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Server error while resolving slug'
       });
     }
   }

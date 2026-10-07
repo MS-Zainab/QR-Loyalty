@@ -2,6 +2,11 @@ import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
 import { logClientError } from '../../services/logging';
+import { theme, cardStyle } from '../../theme';
+import StatCard from '../../components/StatCard';
+import StatusBadge from '../../components/StatusBadge';
+import SectionCard from '../../components/SectionCard';
+import './StaffDashboard.css';
 
 const StaffDashboard = () => {
   const { session, profile, logout } = useAuth();
@@ -147,6 +152,7 @@ const StaffDashboard = () => {
       });
 
       const visitsData =
+        visitsResponse.data?.customers ||
         visitsResponse.data?.visits ||
         visitsResponse.data?.data ||
         visitsResponse.data ||
@@ -842,15 +848,22 @@ const StaffDashboard = () => {
 
                     <th
                       style={{
-                        textAlign:
-                          'left',
-                        padding:
-                          '12px',
-                        borderBottom:
-                          '1px solid #e5e7eb'
+                        textAlign: 'left',
+                        padding: '12px',
+                        borderBottom: '1px solid #e5e7eb'
                       }}
                     >
                       Stamps Collected
+                    </th>
+
+                    <th
+                      style={{
+                        textAlign: 'center',
+                        padding: '12px',
+                        borderBottom: '1px solid #e5e7eb'
+                      }}
+                    >
+                      Total Visits
                     </th>
 
                     <th
@@ -975,6 +988,17 @@ const StaffDashboard = () => {
                             >
                               {visit.total_stamps ?? '-'}
                             </span>
+                          </td>
+
+                          <td
+                            style={{
+                              padding: '12px',
+                              borderBottom: '1px solid #f1f5f9',
+                              textAlign: 'center',
+                              fontWeight: '600'
+                            }}
+                          >
+                            {visit.total_visits ?? '-'}
                           </td>
 
                           <td
