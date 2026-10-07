@@ -198,6 +198,25 @@ router.post(
         });
       }
 
+      // Auto-create corresponding reward record in rewards table
+      if (reward_description && reward_description.trim()) {
+        const { error: rewardError } = await supabaseAdmin
+          .from('rewards')
+          .insert({
+            tenant_id: tenantId,
+            loyalty_program_id: program.id,
+            name: reward_description.trim(),
+            description: `${program.name} - Complete ${stamps_required} visits to unlock`,
+            stamps_required: stamps_required,
+            is_active: true
+          });
+
+        if (rewardError) {
+          console.error('Auto-create reward error:', rewardError);
+          // Don't fail the program creation, just log the error
+        }
+      }
+
       return res.status(200).json({
         success: true,
         message: 'Loyalty program created successfully',
@@ -411,6 +430,64 @@ router.patch(
           success: false,
           message: 'Failed to update loyalty program'
         });
+      }
+
+      // Synchronize reward record if reward_description or stamps_required changed
+      if (reward_description !== undefined || stamps_required !== undefined) {
+        const newRewardName = reward_description !== undefined 
+          ? reward_description.trim() 
+          : existingProgram.reward_description;
+        
+        const newStampsRequired = stamps_required !== undefined 
+          ? stamps_required 
+          : existingProgram.stamps_required;
+
+        if (newRewardName && newRewardName.trim()) {
+          // Find existing reward for this loyalty program
+          const { data: existingReward } = await supabaseAdmin
+            .from('rewards')
+            .select('id')
+            .eq('loyalty_program_id', loyaltyProgramId)
+            .eq('tenant_id', tenantId)
+            .maybeSingle();
+
+          const rewardUpdateData = {
+            name: newRewardName.trim(),
+            description: `${updatedProgram.name} - Complete ${newStampsRequired} visits to unlock`,
+            stamps_required: newStampsRequired,
+            updated_at: new Date().toISOString()
+          };
+
+          if (existingReward) {
+            // Update existing reward
+            await supabaseAdmin
+              .from('rewards')
+              .update(rewardUpdateData)
+              .eq('id', existingReward.id);
+          } else {
+            // Create new reward if none exists
+            await supabaseAdmin
+              .from('rewards')
+              .insert({
+                tenant_id: tenantId,
+                loyalty_program_id: loyaltyProgramId,
+                ...rewardUpdateData,
+                is_active: true
+              });
+          }
+        }
+      }
+
+      // Also sync is_active status to rewards
+      if (is_active !== undefined) {
+        await supabaseAdmin
+          .from('rewards')
+          .update({
+            is_active: is_active,
+            updated_at: new Date().toISOString()
+          })
+          .eq('loyalty_program_id', loyaltyProgramId)
+          .eq('tenant_id', tenantId);
       }
 
       return res.status(200).json({

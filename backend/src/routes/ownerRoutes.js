@@ -238,6 +238,7 @@ router.get(
           tenant: {
             id: tenant.id,
             business_name: tenant.business_name,
+            slug: tenant.slug,
             status: tenant.status,
             created_at: tenant.created_at
           },
@@ -814,9 +815,111 @@ router.get(
 
 /**
  * @swagger
+ * /api/owner/subscription/request:
+ *   post:
+ *     summary: Request admin approval for subscription (creates pending subscription)
+ */
+router.post(
+  '/subscription/request',
+  requireAuth,
+  requireRole('vendor_owner'),
+  async (req, res) => {
+    try {
+      const tenantId = req.profile.tenant_id;
+      const { plan_type = 'basic', billing_cycle = 'monthly' } = req.body || {};
+
+      if (!tenantId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Vendor owner is not associated with a tenant'
+        });
+      }
+
+      // Only allow basic plan requests through this endpoint
+      if (plan_type !== 'basic') {
+        return res.status(400).json({
+          success: false,
+          message: 'Only Basic plan requests are allowed. Contact admin for other plans.'
+        });
+      }
+
+      const validCycles = ['monthly', 'yearly'];
+      if (!validCycles.includes(billing_cycle)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid billing cycle'
+        });
+      }
+
+      const amount = billing_cycle === 'yearly' ? 190 : 19;
+
+      // Check if already has active or pending subscription
+      const { data: existing } = await supabaseAdmin
+        .from('subscriptions')
+        .select('id, status')
+        .eq('tenant_id', tenantId)
+        .maybeSingle();
+
+      if (existing && existing.status === 'pending') {
+        return res.status(400).json({
+          success: false,
+          message: 'You already have a pending subscription request awaiting admin approval'
+        });
+      }
+
+      if (existing && existing.status === 'active') {
+        return res.status(400).json({
+          success: false,
+          message: 'You already have an active subscription'
+        });
+      }
+
+      // Create subscription with pending status (requires admin approval)
+      const { data: subData, error: insertError } = await supabaseAdmin
+        .from('subscriptions')
+        .upsert({
+          tenant_id: tenantId,
+          plan_type,
+          status: 'pending',
+          billing_cycle,
+          amount_paid: 0,
+          current_period_end: null,
+          updated_at: new Date().toISOString()
+        }, {
+          onConflict: 'tenant_id'
+        })
+        .select()
+        .single();
+
+      if (insertError) {
+        console.error('Request subscription error:', insertError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to submit subscription request'
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Subscription request submitted successfully. Awaiting admin approval.',
+        subscription: subData
+      });
+    } catch (error) {
+      console.error('Request subscription error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to submit subscription request'
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
  * /api/owner/subscription/upgrade:
  *   post:
- *     summary: Upgrade tenant subscription
+ *     summary: Upgrade tenant subscription (deprecated - use request endpoint instead)
+ *     description: This endpoint is deprecated. Tenant owners should use /request endpoint which requires admin approval.
  */
 router.post(
   '/subscription/upgrade',
@@ -834,70 +937,10 @@ router.post(
         });
       }
 
-      const validPlans = ['basic', 'pro', 'enterprise'];
-      if (!validPlans.includes(plan_type)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid plan type selected'
-        });
-      }
-
-      const days = billing_cycle === 'yearly' ? 365 : 30;
-      const periodEnd = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
-      const amount = plan_type === 'basic' ? (billing_cycle === 'yearly' ? 190 : 19)
-        : plan_type === 'pro' ? (billing_cycle === 'yearly' ? 490 : 49)
-        : (billing_cycle === 'yearly' ? 990 : 99);
-
-      const { data: existing } = await supabaseAdmin
-        .from('subscriptions')
-        .select('id')
-        .eq('tenant_id', tenantId)
-        .maybeSingle();
-
-      let subData;
-      if (existing) {
-        const { data: updated } = await supabaseAdmin
-          .from('subscriptions')
-          .update({
-            plan_type,
-            status: 'active',
-            billing_cycle,
-            amount_paid: amount,
-            current_period_end: periodEnd,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', existing.id)
-          .select()
-          .single();
-        subData = updated;
-      } else {
-        const { data: created } = await supabaseAdmin
-          .from('subscriptions')
-          .insert({
-            tenant_id: tenantId,
-            plan_type,
-            status: 'active',
-            billing_cycle,
-            amount_paid: amount,
-            current_period_end: periodEnd
-          })
-          .select()
-          .single();
-        subData = created;
-      }
-
-      await supabaseAdmin.from('tenants').update({ status: 'active', updated_at: new Date().toISOString() }).eq('id', tenantId);
-
-      return res.status(200).json({
-        success: true,
-        message: `Successfully subscribed to ${plan_type.toUpperCase()} plan!`,
-        subscription: subData || {
-          plan_type,
-          status: 'active',
-          billing_cycle,
-          amount_paid: amount,
-          current_period_end: periodEnd
-        }
+      // Block direct upgrades - require admin approval
+      return res.status(403).json({
+        success: false,
+        message: 'Direct subscription upgrades are disabled. Please use the "Request Grant" button and wait for admin approval.'
       });
     } catch (error) {
       console.error('Upgrade subscription error:', error);

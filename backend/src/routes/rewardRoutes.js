@@ -44,6 +44,54 @@ router.get(
                 });
             }
 
+            // Synchronize missing rewards from loyalty programs (idempotent)
+            // This ensures existing loyalty programs created before this fix appear in rewards list
+            const { data: loyaltyPrograms } = await supabaseAdmin
+                .from('loyalty_programs')
+                .select('id, name, stamps_required, reward_description, is_active')
+                .eq('tenant_id', tenantId);
+
+            if (loyaltyPrograms && loyaltyPrograms.length > 0) {
+                for (const program of loyaltyPrograms) {
+                    // Only sync if program has a reward_description
+                    if (program.reward_description && program.reward_description.trim()) {
+                        // Check if reward already exists for this loyalty program
+                        const { data: existingReward } = await supabaseAdmin
+                            .from('rewards')
+                            .select('id')
+                            .eq('loyalty_program_id', program.id)
+                            .eq('tenant_id', tenantId)
+                            .maybeSingle();
+
+                        if (!existingReward) {
+                            // Create missing reward record (one-time sync)
+                            await supabaseAdmin
+                                .from('rewards')
+                                .insert({
+                                    tenant_id: tenantId,
+                                    loyalty_program_id: program.id,
+                                    name: program.reward_description.trim(),
+                                    description: `${program.name} - Complete ${program.stamps_required} visits to unlock`,
+                                    stamps_required: program.stamps_required,
+                                    is_active: program.is_active !== false
+                                });
+                        } else {
+                            // Update existing reward to match current program state
+                            await supabaseAdmin
+                                .from('rewards')
+                                .update({
+                                    name: program.reward_description.trim(),
+                                    description: `${program.name} - Complete ${program.stamps_required} visits to unlock`,
+                                    stamps_required: program.stamps_required,
+                                    is_active: program.is_active !== false,
+                                    updated_at: new Date().toISOString()
+                                })
+                                .eq('id', existingReward.id);
+                        }
+                    }
+                }
+            }
+
             const { data: rewards, error } = await supabaseAdmin
                 .from('rewards')
                 .select('*')

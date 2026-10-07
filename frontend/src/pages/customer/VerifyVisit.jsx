@@ -2,6 +2,7 @@
 import { useState, useRef, useEffect } from 'react';
 import {
   useNavigate,
+  useParams,
   useSearchParams
 } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
@@ -12,6 +13,34 @@ const VerifyVisit = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { session, profile, customerLogin } = useAuth();
+
+  // Tenant slug stays in the URL across the whole scan flow; sessionStorage
+  // covers navigation into this page from other tenant-scoped screens.
+  const slug =
+    useParams().slug || sessionStorage.getItem('tenant_slug') || '';
+  const customerBasePath = slug
+    ? `/v/${encodeURIComponent(slug)}`
+    : '';
+
+  const [businessName, setBusinessName] = useState('');
+
+  useEffect(() => {
+    if (!slug) return;
+
+    let cancelled = false;
+    api
+      .get(`/tenants/info/${encodeURIComponent(slug)}`)
+      .then((response) => {
+        if (!cancelled) {
+          setBusinessName(response.data?.business_name || '');
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
 
   const qrCodeFromUrl = searchParams.get('qr_code') || '';
   const [manualQrCode, setManualQrCode] = useState('');
@@ -233,7 +262,7 @@ const VerifyVisit = () => {
       setPin('');
 
       setTimeout(() => {
-        navigate('/customer');
+        navigate(`${customerBasePath}/customer`);
       }, 1200);
     } catch (err) {
       logClientError('Visit verification failed', err);
@@ -277,7 +306,7 @@ const VerifyVisit = () => {
               fontSize: '26px'
             }}
           >
-            Verify Visit
+            {businessName ? `${businessName} — Verify Visit` : 'Verify Visit'}
           </h1>
 
           <p
@@ -294,7 +323,7 @@ const VerifyVisit = () => {
         <button
           type="button"
           onClick={() =>
-            navigate('/customer')
+            navigate(`${customerBasePath}/customer`)
           }
           style={{
             padding: '10px 18px',

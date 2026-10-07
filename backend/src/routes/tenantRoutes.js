@@ -955,4 +955,69 @@ router.get(
   }
 );
 
+/**
+ * @swagger
+ * /api/tenants/info/{slug}:
+ *   get:
+ *     summary: Get tenant info by slug (for login page branding)
+ *     description: Public endpoint. Returns basic tenant information for login page branding. No authentication required.
+ *     tags:
+ *       - Tenants
+ *     parameters:
+ *       - in: path
+ *         name: slug
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Tenant info retrieved successfully
+ *       404:
+ *         description: Tenant not found
+ */
+router.get(
+  '/info/:slug',
+  async (req, res) => {
+    try {
+      const { slug } = req.params;
+
+      if (!/^[a-z0-9-]{2,60}$/.test(slug)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid slug format'
+        });
+      }
+
+      const { data: tenant, error } = await supabaseAdmin
+        .from('tenants')
+        .select('id, business_name, slug, status')
+        .eq('slug', slug)
+        .maybeSingle();
+
+      if (error || !tenant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Tenant not found'
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        tenant: {
+          id: tenant.id,
+          business_name: tenant.business_name,
+          slug: tenant.slug,
+          status: tenant.status
+        }
+      });
+    } catch (error) {
+      console.error('Tenant info lookup error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to retrieve tenant info'
+      });
+    }
+  }
+);
+
 module.exports = router;

@@ -1,17 +1,18 @@
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 
 /**
  * SlugRedirect — public page mounted at /v/:slug
  *
  * Resolves a tenant branded slug to its active QR code and immediately
- * redirects the user to /customer/verify?qr_code=<code>.
+ * redirects the user to /v/:slug/verify?qr_code=<code>.
  *
  * No authentication is required because GET /api/tenants/slug/:slug is public.
  */
 const SlugRedirect = () => {
   const { slug } = useParams();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const [error, setError] = useState('');
   const [businessName, setBusinessName] = useState('');
@@ -19,20 +20,33 @@ const SlugRedirect = () => {
   useEffect(() => {
     let cancelled = false;
 
+    const qrCodeFromUrl = searchParams.get('qr_code');
+
+    const redirectTo = (qrCode) => {
+      setTimeout(() => {
+        if (!cancelled) {
+          navigate(
+            `/v/${encodeURIComponent(slug)}/verify?qr_code=${encodeURIComponent(qrCode)}`,
+            { replace: true }
+          );
+        }
+      }, 600);
+    };
+
     const resolve = async () => {
       try {
+        // QR codes encode /v/:slug?qr_code=<code>; reuse it when present.
+        if (qrCodeFromUrl) {
+          redirectTo(qrCodeFromUrl);
+          return;
+        }
+
         const response = await api.get(`/tenants/slug/${encodeURIComponent(slug)}`);
         if (cancelled) return;
 
         const { qr_code, business_name } = response.data;
         setBusinessName(business_name || '');
-
-        // Short visual pause so the user sees the business name before redirect
-        setTimeout(() => {
-          if (!cancelled) {
-            navigate(`/customer/verify?qr_code=${encodeURIComponent(qr_code)}`, { replace: true });
-          }
-        }, 600);
+        redirectTo(qr_code);
       } catch (err) {
         if (cancelled) return;
         const msg =
@@ -44,7 +58,7 @@ const SlugRedirect = () => {
 
     resolve();
     return () => { cancelled = true; };
-  }, [slug, navigate]);
+  }, [slug, navigate, searchParams]);
 
   return (
     <div

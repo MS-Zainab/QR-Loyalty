@@ -305,6 +305,7 @@ router.get(
       const vendors = tenants.map((tenant) => ({
         id: tenant.id,
         business_name: tenant.business_name,
+        slug: tenant.slug,
         status: tenant.status,
         created_at: tenant.created_at,
         updated_at: tenant.updated_at,
@@ -1433,6 +1434,7 @@ router.get(
       const totalPaid = tenantSubscriptions.filter((s) => s.payment_status === 'paid' && s.status === 'active').length;
       const totalGranted = tenantSubscriptions.filter((s) => s.payment_status === 'granted' && s.status === 'active').length;
       const totalTrial = tenantSubscriptions.filter((s) => s.payment_status === 'trial' && s.status === 'active').length;
+      const totalPending = tenantSubscriptions.filter((s) => s.status === 'pending').length;
       const totalExpired = tenantSubscriptions.filter((s) => s.status === 'expired').length;
 
       return res.status(200).json({
@@ -1441,6 +1443,7 @@ router.get(
           total_paid_tenants: totalPaid,
           total_granted_tenants: totalGranted,
           active_trials: totalTrial,
+          pending_requests: totalPending,
           expired_subscriptions: totalExpired
         },
         subscriptions: tenantSubscriptions

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams, useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import { logClientError } from '../services/logging';
@@ -7,7 +7,11 @@ import { logClientError } from '../services/logging';
 const Login = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const { slug: slugFromUrl } = useParams(); // Extract tenant slug from URL param
   const qrCodeFromUrl = searchParams.get('qr_code');
+
+  // Resolve slug: URL param takes priority, then sessionStorage fallback
+  const slug = slugFromUrl || sessionStorage.getItem('tenant_slug') || null;
 
   const { login, customerLogin, resetPassword } = useAuth();
 
@@ -19,6 +23,53 @@ const Login = () => {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  
+  // Tenant branding state
+  const [tenantInfo, setTenantInfo] = useState(null);
+  const [tenantLoading, setTenantLoading] = useState(false);
+
+  // Fetch tenant info whenever slug is known
+  useEffect(() => {
+    if (!slug) return;
+
+    let cancelled = false;
+    const fetchTenantInfo = async () => {
+      try {
+        setTenantLoading(true);
+        const response = await api.get(`/tenants/info/${encodeURIComponent(slug)}`);
+        if (!cancelled && response.data?.success) {
+          setTenantInfo(response.data.tenant);
+        }
+      } catch (err) {
+        console.error('Failed to fetch tenant info:', err);
+        // Fall back to default branding silently
+      } finally {
+        if (!cancelled) setTenantLoading(false);
+      }
+    };
+    fetchTenantInfo();
+    return () => { cancelled = true; };
+  }, [slug]);
+
+  // Update document title to reflect tenant name
+  useEffect(() => {
+    if (tenantInfo?.business_name) {
+      document.title = `${tenantInfo.business_name} — Login`;
+    } else {
+      document.title = 'QR Loyalty — Login';
+    }
+    return () => { document.title = 'QR Loyalty'; };
+  }, [tenantInfo]);
+
+  // Determine display name for login page
+  const displayTitle = tenantInfo?.business_name || 'QR Loyalty';
+  const displaySubtitle = tenantInfo 
+    ? `Sign in to ${tenantInfo.business_name}` 
+    : 'Sign in to your account';
+  // Badge shows first letter of tenant name (or "QR" for default)
+  const badgeLabel = tenantInfo?.business_name
+    ? tenantInfo.business_name.charAt(0).toUpperCase()
+    : 'QR';
 
   // Password Recovery state
   const [showForgotModal, setShowForgotModal] = useState(false);
@@ -37,14 +88,17 @@ const Login = () => {
       const data = await login(email, password);
       const role = data?.profile?.role;
 
+      // Navigate with tenant slug if present
+      const basePath = slug ? `/v/${slug}` : '';
+      
       if (role === 'admin') {
         navigate('/admin');
       } else if (role === 'vendor_owner') {
-        navigate('/owner');
+        navigate(`${basePath}/owner`);
       } else if (role === 'vendor_staff') {
-        navigate('/staff');
+        navigate(`${basePath}/staff`);
       } else if (role === 'customer') {
-        navigate('/customer');
+        navigate(`${basePath}/customer`);
       } else {
         setError('User role could not be determined.');
       }
@@ -65,14 +119,16 @@ const Login = () => {
     try {
       await customerLogin(customerName, customerPhone);
       
+      const basePath = slug ? `/v/${slug}` : '';
+      
       if (qrCodeFromUrl) {
         await api.post('/customers/register', {
           qr_code: qrCodeFromUrl,
           phone: customerPhone
         });
-        navigate(`/customer/verify?qr_code=${encodeURIComponent(qrCodeFromUrl)}`);
+        navigate(`${basePath}/verify?qr_code=${encodeURIComponent(qrCodeFromUrl)}`);
       } else {
-        navigate('/customer');
+        navigate(`${basePath}/customer`);
       }
     } catch (err) {
       logClientError('Customer login failed', err);
@@ -110,9 +166,11 @@ const Login = () => {
     <div style={styles.page}>
       <div style={styles.card}>
         <div style={styles.header}>
-          <div style={styles.logoBadge}>QR</div>
-          <h1 style={styles.title}>QR Loyalty</h1>
-          <p style={styles.subtitle}>Sign in to your account</p>
+          <div style={styles.logoBadge}>{badgeLabel}</div>
+          <h1 style={styles.title}>
+            {tenantLoading ? 'Loading...' : displayTitle}
+          </h1>
+          <p style={styles.subtitle}>{displaySubtitle}</p>
 
           <div style={{ display: 'flex', gap: '8px', marginTop: '16px', backgroundColor: '#f3f4f6', padding: '4px', borderRadius: '8px' }}>
             <button

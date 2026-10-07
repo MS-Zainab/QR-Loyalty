@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom';
 
 import ProtectedRoute from './routes/ProtectedRoute';
 
@@ -11,6 +11,28 @@ const OwnerDashboard = lazy(() => import('./pages/owner/OwnerDashboard'));
 const AdminDashboard = lazy(() => import('./pages/admin/AdminDashboard'));
 const SlugRedirect = lazy(() => import('./pages/customer/SlugRedirect'));
 
+/**
+ * TenantScopedRoute - Wrapper component that preserves tenant slug in URL.
+ * Persists the slug to sessionStorage so ProtectedRoute can read it even
+ * when the URL no longer contains the :slug param (e.g. after a redirect).
+ */
+const TenantScopedRoute = ({ children }) => {
+  const { slug } = useParams();
+  if (slug) {
+    sessionStorage.setItem('tenant_slug', slug);
+  }
+  return children;
+};
+
+/**
+ * SlugAwareRedirect - Used for root / and * catch-all routes.
+ * Redirects to /v/:slug/login when a slug is in sessionStorage,
+ * otherwise falls back to plain /login.
+ */
+const SlugAwareRedirect = () => {
+  const slug = sessionStorage.getItem('tenant_slug');
+  return <Navigate to={slug ? `/v/${slug}/login` : '/login'} replace />;
+};
 
 function App() {
   return (
@@ -18,83 +40,75 @@ function App() {
       <Suspense fallback={<div className="page-loading" role="status">Loading page…</div>}>
       <Routes>
 
-        {/* Public route */}
+        {/* Root — redirect to login, preserving slug if known */}
         <Route
           path="/"
+          element={<SlugAwareRedirect />}
+        />
+
+        {/* Tenant-scoped login route - MUST come before generic /login */}
+        <Route
+          path="/v/:slug/login"
           element={
-            <Navigate
-              to="/login"
-              replace
-            />
+            <TenantScopedRoute>
+              <Login />
+            </TenantScopedRoute>
           }
         />
 
+        {/* Generic login route (fallback — used by admin and non-slug flows) */}
         <Route
           path="/login"
           element={<Login />}
         />
 
-        {/* Admin routes */}
-       <Route
-  element={
-    <ProtectedRoute
-      allowedRoles={['admin']}
-    />
-  }
->
-  <Route
-    path="/admin"
-    element={<AdminDashboard />}
-  />
-</Route>
+        {/* ── Tenant-scoped protected routes ──────────────────────────── */}
 
-        {/* Vendor Owner routes */}
+        {/* Staff */}
         <Route
+          path="/v/:slug/staff"
           element={
-            <ProtectedRoute
-              allowedRoles={['vendor_owner']}
-            />
+            <TenantScopedRoute>
+              <ProtectedRoute allowedRoles={['vendor_staff']}>
+                <StaffDashboard />
+              </ProtectedRoute>
+            </TenantScopedRoute>
           }
-        >
-          <Route
-            path="/owner"
-            element={<OwnerDashboard />}
-          />
-        </Route>
-
-        {/* Vendor Staff routes */}
-        <Route
-          element={
-            <ProtectedRoute
-              allowedRoles={['vendor_staff']}
-            />
-          }
-        >
-          <Route
-            path="/staff"
-            element={<StaffDashboard />}
-          />
-        </Route>
-
-        {/* Customer entry / visit verification route */}
-        <Route
-          path="/customer/verify"
-          element={<VerifyVisit />}
         />
 
-        {/* Customer Dashboard routes */}
+        {/* Owner */}
         <Route
+          path="/v/:slug/owner"
           element={
-            <ProtectedRoute
-              allowedRoles={['customer']}
-            />
+            <TenantScopedRoute>
+              <ProtectedRoute allowedRoles={['vendor_owner']}>
+                <OwnerDashboard />
+              </ProtectedRoute>
+            </TenantScopedRoute>
           }
-        >
-          <Route
-            path="/customer"
-            element={<CustomerDashboard />}
-          />
-        </Route>
+        />
+
+        {/* Customer dashboard */}
+        <Route
+          path="/v/:slug/customer"
+          element={
+            <TenantScopedRoute>
+              <ProtectedRoute allowedRoles={['customer']}>
+                <CustomerDashboard />
+              </ProtectedRoute>
+            </TenantScopedRoute>
+          }
+        />
+
+        {/* Visit verification (tenant-scoped) */}
+        <Route
+          path="/v/:slug/verify"
+          element={
+            <TenantScopedRoute>
+              <VerifyVisit />
+            </TenantScopedRoute>
+          }
+        />
 
         {/* Branded slug QR redirect — public, no auth */}
         <Route
@@ -102,17 +116,41 @@ function App() {
           element={<SlugRedirect />}
         />
 
-        {/* Unknown routes */}
+        {/* ── Admin routes (no tenant scoping) ────────────────────────── */}
+        <Route
+          element={<ProtectedRoute allowedRoles={['admin']} />}
+        >
+          <Route path="/admin" element={<AdminDashboard />} />
+        </Route>
+
+        {/* ── Legacy routes (backward-compat, no slug prefix) ─────────── */}
 
         <Route
-          path="*"
-          element={
-            <Navigate
-              to="/login"
-              replace
-            />
-          }
+          element={<ProtectedRoute allowedRoles={['vendor_owner']} />}
+        >
+          <Route path="/owner" element={<OwnerDashboard />} />
+        </Route>
+
+        <Route
+          element={<ProtectedRoute allowedRoles={['vendor_staff']} />}
+        >
+          <Route path="/staff" element={<StaffDashboard />} />
+        </Route>
+
+        <Route
+          element={<ProtectedRoute allowedRoles={['customer']} />}
+        >
+          <Route path="/customer" element={<CustomerDashboard />} />
+        </Route>
+
+        {/* Customer visit verification (legacy) */}
+        <Route
+          path="/customer/verify"
+          element={<VerifyVisit />}
         />
+
+        {/* Unknown routes — slug-aware fallback */}
+        <Route path="*" element={<SlugAwareRedirect />} />
 
       </Routes>
       </Suspense>

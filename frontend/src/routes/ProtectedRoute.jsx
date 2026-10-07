@@ -1,7 +1,17 @@
-import { Navigate, Outlet, useLocation } from 'react-router-dom';
+import { Navigate, Outlet, useLocation, useParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-const ProtectedRoute = ({ allowedRoles }) => {
+/**
+ * Resolves the active tenant slug from (in priority order):
+ *  1. The :slug URL param (when inside a /v/:slug/* route)
+ *  2. sessionStorage (persisted by TenantScopedRoute on first visit)
+ */
+const useTenantSlug = () => {
+  const { slug } = useParams();
+  return slug || sessionStorage.getItem('tenant_slug') || null;
+};
+
+const ProtectedRoute = ({ allowedRoles, children }) => {
   const {
     loading,
     session,
@@ -18,12 +28,17 @@ const ProtectedRoute = ({ allowedRoles }) => {
   }
 
   const { search, pathname } = useLocation();
+  const slug = useTenantSlug();
 
-  // User is not logged in
+  // Build prefix — every redirect stays under /v/:slug when a slug is known
+  const tenantBase = slug ? `/v/${slug}` : '';
+
+  // User is not logged in → send to tenant-scoped login (or generic)
   if (!session || !profile) {
+    const loginPath = slug ? `/v/${slug}/login${search}` : `/login${search}`;
     return (
       <Navigate
-        to={`/login${search}`}
+        to={loginPath}
         state={{ from: pathname }}
         replace
       />
@@ -47,7 +62,7 @@ const ProtectedRoute = ({ allowedRoles }) => {
     if (profile.role === 'vendor_owner') {
       return (
         <Navigate
-          to="/owner"
+          to={`${tenantBase}/owner`}
           replace
         />
       );
@@ -56,7 +71,7 @@ const ProtectedRoute = ({ allowedRoles }) => {
     if (profile.role === 'vendor_staff') {
       return (
         <Navigate
-          to="/staff"
+          to={`${tenantBase}/staff`}
           replace
         />
       );
@@ -65,21 +80,24 @@ const ProtectedRoute = ({ allowedRoles }) => {
     if (profile.role === 'customer') {
       return (
         <Navigate
-          to="/customer"
+          to={`${tenantBase}/customer`}
           replace
         />
       );
     }
 
+    const loginPath = slug ? `/v/${slug}/login` : '/login';
     return (
       <Navigate
-        to="/login"
+        to={loginPath}
         replace
       />
     );
   }
 
-  return <Outlet />;
+  // Render children (used when ProtectedRoute wraps a single element)
+  // or Outlet (used when ProtectedRoute is a layout route)
+  return children ?? <Outlet />;
 };
 
 export default ProtectedRoute;

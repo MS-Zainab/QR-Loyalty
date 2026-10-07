@@ -50,6 +50,13 @@ const OwnerDashboard = () => {
   const [loyaltyRewardInput, setLoyaltyRewardInput] = useState('');
   const [loyaltySaving, setLoyaltySaving] = useState(false);
 
+  // Reward management state
+  const [showRewardModal, setShowRewardModal] = useState(false);
+  const [rewardNameInput, setRewardNameInput] = useState('');
+  const [rewardDescriptionInput, setRewardDescriptionInput] = useState('');
+  const [rewardStampsInput, setRewardStampsInput] = useState(10);
+  const [rewardSaving, setRewardSaving] = useState(false);
+
   // Subscription state
   const [subscription, setSubscription] = useState(null);
   const [subLoading, setSubLoading] = useState(false);
@@ -189,6 +196,25 @@ const OwnerDashboard = () => {
     }
   };
 
+  const handleRequestGrant = async () => {
+    try {
+      setSubLoading(true);
+      setError('');
+      setSubSuccess('');
+      const response = await api.post('/owner/subscription/request', {
+        plan_type: 'basic',
+        billing_cycle: 'monthly'
+      }, getConfig());
+      setSubSuccess(response.data?.message || 'Subscription request submitted successfully. Awaiting admin approval.');
+      await loadSubscription();
+    } catch (err) {
+      logClientError('Request grant failed', err);
+      setError(err?.response?.data?.message || 'Failed to submit subscription request.');
+    } finally {
+      setSubLoading(false);
+    }
+  };
+
   const loadQr = async (signal) => {
     try {
       let response = await api.get(
@@ -216,30 +242,29 @@ const OwnerDashboard = () => {
       }
 
       setQr(qrRecord);
-
-      if (qrRecord?.code) {
-        const verificationUrl =
-          `${window.location.origin}/customer/verify?qr_code=${encodeURIComponent(
-            qrRecord.code
-          )}`;
-
-        QRCode.toDataURL(verificationUrl, {
-          width: 320,
-          margin: 2
-        }).then((image) => {
-          if (!signal?.aborted) setQrImage(image);
-        }).catch((err) => {
-          if (signal?.aborted) return;
-          logClientError('QR image generation failed', err);
-        });
-      } else {
-        setQrImage('');
-      }
     } catch (err) {
       if (signal?.aborted) return;
       logClientError('Load or generate QR failed', err);
     }
   };
+
+  // Regenerate the QR image when the code or tenant slug changes so scanned
+  // URLs always point at the tenant-branded /v/:slug route.
+  useEffect(() => {
+    if (!qr?.code) {
+      setQrImage('');
+      return;
+    }
+
+    QRCode.toDataURL(getQrUrl(), {
+      width: 320,
+      margin: 2
+    }).then((image) => {
+      setQrImage(image);
+    }).catch((err) => {
+      logClientError('QR image generation failed', err);
+    });
+  }, [qr?.code, currentSlug]);
 
   const loadAllData = async (signal) => {
     if (!session?.access_token) {
@@ -516,6 +541,59 @@ const OwnerDashboard = () => {
     }
   };
 
+  const handleOpenAddReward = () => {
+    setError('');
+    setOnboardingSuccess('');
+    setRewardNameInput('');
+    setRewardDescriptionInput('');
+    setRewardStampsInput(10);
+    setShowRewardModal(true);
+  };
+
+  const handleSaveReward = async (event) => {
+    event.preventDefault();
+    setError('');
+    setOnboardingSuccess('');
+
+    if (!rewardNameInput.trim()) {
+      setError('Reward name is required.');
+      return;
+    }
+
+    const requiredStamps = Number(rewardStampsInput);
+    if (!Number.isInteger(requiredStamps) || requiredStamps < 1) {
+      setError('Required stamps must be a positive number.');
+      return;
+    }
+
+    try {
+      setRewardSaving(true);
+
+      await api.post(
+        '/rewards',
+        {
+          name: rewardNameInput.trim(),
+          description: rewardDescriptionInput.trim() || undefined,
+          stamps_required: requiredStamps
+        },
+        getConfig()
+      );
+
+      setOnboardingSuccess('Reward created successfully!');
+      setShowRewardModal(false);
+      await loadRewards();
+    } catch (err) {
+      logClientError('Create reward failed', err);
+      setError(
+        err?.response?.data?.message ||
+          err?.response?.data?.error ||
+          'Failed to create reward.'
+      );
+    } finally {
+      setRewardSaving(false);
+    }
+  };
+
   const handleToggleLoyaltyStatus = async (program) => {
     if (!program?.id) return;
     setError('');
@@ -561,6 +639,14 @@ const OwnerDashboard = () => {
   const getQrUrl = () => {
     if (!qr?.code) {
       return '';
+    }
+
+    if (currentSlug) {
+      return (
+        `${window.location.origin}` +
+        `/v/${encodeURIComponent(currentSlug)}/verify?qr_code=` +
+        encodeURIComponent(qr.code)
+      );
     }
 
     return (
@@ -1046,6 +1132,74 @@ const OwnerDashboard = () => {
               </div>
             </div>
           )}
+
+          {/* Add Reward Modal */}
+          {showRewardModal && (
+            <div style={styles.modalOverlay}>
+              <div style={styles.modalContent}>
+                <h3 style={styles.modalTitle}>Create New Reward</h3>
+                <p style={styles.modalSubtitle}>
+                  Create a reward that staff can redeem for eligible customers.
+                </p>
+
+                <form onSubmit={handleSaveReward} style={{ marginTop: '20px' }}>
+                  <div style={styles.formGroup}>
+                    <label style={styles.label}>Reward Name *</label>
+                    <input
+                      type="text"
+                      value={rewardNameInput}
+                      onChange={(e) => setRewardNameInput(e.target.value)}
+                      placeholder="e.g. Free Coffee"
+                      required
+                      style={styles.input}
+                    />
+                  </div>
+
+                  <div style={styles.formGroup}>
+                    <label style={styles.label}>Description</label>
+                    <input
+                      type="text"
+                      value={rewardDescriptionInput}
+                      onChange={(e) => setRewardDescriptionInput(e.target.value)}
+                      placeholder="e.g. One free coffee of any size"
+                      style={styles.input}
+                    />
+                  </div>
+
+                  <div style={styles.formGroup}>
+                    <label style={styles.label}>Stamps Required *</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={rewardStampsInput}
+                      onChange={(e) => setRewardStampsInput(e.target.value)}
+                      required
+                      style={styles.input}
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '12px', marginTop: '24px' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowRewardModal(false);
+                      }}
+                      style={styles.cancelButton}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={rewardSaving}
+                      style={styles.primaryButton}
+                    >
+                      {rewardSaving ? 'Creating...' : 'Create Reward'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
         </section>
       )}
 
@@ -1305,9 +1459,26 @@ const OwnerDashboard = () => {
       {/* Rewards */}
       {activeSection === 'rewards' && (
         <section style={styles.card}>
-          <h2 style={styles.sectionTitle}>
-            Rewards
-          </h2>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+            <h2 style={{ ...styles.sectionTitle, margin: 0 }}>
+              Rewards
+            </h2>
+            <button
+              type="button"
+              onClick={handleOpenAddReward}
+              style={{
+                padding: '10px 18px',
+                border: 'none',
+                borderRadius: '8px',
+                backgroundColor: '#2563eb',
+                color: '#ffffff',
+                fontWeight: '600',
+                cursor: 'pointer'
+              }}
+            >
+              + Add Reward
+            </button>
+          </div>
 
           {rewards.length > 0 ? (
             <div
@@ -1321,11 +1492,15 @@ const OwnerDashboard = () => {
                 <thead>
                   <tr>
                     <th style={styles.th}>
-                      Reward
+                      Reward Name
                     </th>
 
                     <th style={styles.th}>
                       Description
+                    </th>
+
+                    <th style={styles.th}>
+                      Stamps Required
                     </th>
 
                     <th style={styles.th}>
@@ -1366,6 +1541,14 @@ const OwnerDashboard = () => {
                             styles.td
                           }
                         >
+                          {reward.stamps_required || '-'}
+                        </td>
+
+                        <td
+                          style={
+                            styles.td
+                          }
+                        >
                           {reward.is_active ===
                           false
                             ? 'Inactive'
@@ -1378,9 +1561,14 @@ const OwnerDashboard = () => {
               </table>
             </div>
           ) : (
-            <p style={styles.empty}>
-              No rewards found.
-            </p>
+            <div style={{ textAlign: 'center', padding: '40px 20px' }}>
+              <p style={{ fontSize: '16px', color: '#64748b', marginBottom: '16px' }}>
+                No rewards found. Create your first reward to start redeeming for customers.
+              </p>
+              <p style={{ fontSize: '14px', color: '#94a3b8' }}>
+                Note: Rewards are automatically created when you create a Loyalty Program with a reward description.
+              </p>
+            </div>
           )}
         </section>
       )}
@@ -1690,7 +1878,7 @@ const OwnerDashboard = () => {
           {/* Plan Options */}
           <h3 style={{ margin: '0 0 16px', fontSize: '18px', fontWeight: '700', color: '#0f172a' }}>Available Plans & Packages</h3>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '20px' }}>
-            {/* Basic Plan */}
+            {/* Basic Plan - Only plan available for owner request */}
             <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', border: subscription?.plan_type === 'basic' ? '2px solid #2563eb' : '1px solid #e2e8f0', padding: '20px', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
               <h4 style={{ margin: '0 0 8px', fontSize: '18px', fontWeight: '700', color: '#1e293b' }}>Basic Plan</h4>
               <div style={{ fontSize: '24px', fontWeight: '800', color: '#0f172a', marginBottom: '12px' }}>$19 <span style={{ fontSize: '14px', color: '#64748b', fontWeight: 'normal' }}>/ month</span></div>
@@ -1701,78 +1889,20 @@ const OwnerDashboard = () => {
               </ul>
               <button
                 type="button"
-                disabled={subLoading || subscription?.plan_type === 'basic'}
-                onClick={() => handleOpenCheckout('basic', 'Basic Plan', 19)}
+                disabled={subLoading || subscription?.status === 'active' || subscription?.status === 'pending'}
+                onClick={handleRequestGrant}
                 style={{
                   width: '100%',
                   padding: '10px',
                   borderRadius: '8px',
                   border: 'none',
-                  backgroundColor: subscription?.plan_type === 'basic' ? '#cbd5e1' : '#2563eb',
-                  color: '#ffffff',
+                  backgroundColor: subscription?.status === 'pending' ? '#fef3c7' : subscription?.status === 'active' ? '#cbd5e1' : '#2563eb',
+                  color: subscription?.status === 'pending' ? '#92400e' : subscription?.status === 'active' ? '#64748b' : '#ffffff',
                   fontWeight: '600',
-                  cursor: subscription?.plan_type === 'basic' ? 'default' : 'pointer'
+                  cursor: subscription?.status === 'active' || subscription?.status === 'pending' ? 'default' : 'pointer'
                 }}
               >
-                {subscription?.plan_type === 'basic' ? 'Current Plan' : 'Select Basic'}
-              </button>
-            </div>
-
-            {/* Pro Plan */}
-            <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', border: subscription?.plan_type === 'pro' ? '2px solid #2563eb' : '2px solid #3b82f6', padding: '20px', boxShadow: '0 4px 12px rgba(37,99,235,0.08)', position: 'relative' }}>
-              <div style={{ position: 'absolute', top: '-12px', right: '16px', backgroundColor: '#2563eb', color: '#ffffff', fontSize: '11px', fontWeight: '700', padding: '2px 8px', borderRadius: '10px' }}>POPULAR</div>
-              <h4 style={{ margin: '0 0 8px', fontSize: '18px', fontWeight: '700', color: '#1e293b' }}>Pro Plan</h4>
-              <div style={{ fontSize: '24px', fontWeight: '800', color: '#0f172a', marginBottom: '12px' }}>$49 <span style={{ fontSize: '14px', color: '#64748b', fontWeight: 'normal' }}>/ month</span></div>
-              <ul style={{ paddingLeft: '18px', margin: '0 0 20px', fontSize: '14px', color: '#475569', lineHeight: 1.6 }}>
-                <li>Unlimited Counter Staff</li>
-                <li>Multiple Loyalty Programs</li>
-                <li>Full Customer Analytics</li>
-                <li>Priority Support</li>
-              </ul>
-              <button
-                type="button"
-                disabled={subLoading || subscription?.plan_type === 'pro'}
-                onClick={() => handleOpenCheckout('pro', 'Pro Plan', 49)}
-                style={{
-                  width: '100%',
-                  padding: '10px',
-                  borderRadius: '8px',
-                  border: 'none',
-                  backgroundColor: subscription?.plan_type === 'pro' ? '#cbd5e1' : '#2563eb',
-                  color: '#ffffff',
-                  fontWeight: '600',
-                  cursor: subscription?.plan_type === 'pro' ? 'default' : 'pointer'
-                }}
-              >
-                {subscription?.plan_type === 'pro' ? 'Current Plan' : 'Upgrade to Pro'}
-              </button>
-            </div>
-
-            {/* Enterprise Plan */}
-            <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', border: subscription?.plan_type === 'enterprise' ? '2px solid #2563eb' : '1px solid #e2e8f0', padding: '20px', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
-              <h4 style={{ margin: '0 0 8px', fontSize: '18px', fontWeight: '700', color: '#1e293b' }}>Enterprise</h4>
-              <div style={{ fontSize: '24px', fontWeight: '800', color: '#0f172a', marginBottom: '12px' }}>$99 <span style={{ fontSize: '14px', color: '#64748b', fontWeight: 'normal' }}>/ month</span></div>
-              <ul style={{ paddingLeft: '18px', margin: '0 0 20px', fontSize: '14px', color: '#475569', lineHeight: 1.6 }}>
-                <li>Multi-location Support</li>
-                <li>Custom Branding & Domain</li>
-                <li>Dedicated Account Manager</li>
-              </ul>
-              <button
-                type="button"
-                disabled={subLoading || subscription?.plan_type === 'enterprise'}
-                onClick={() => handleOpenCheckout('enterprise', 'Enterprise Plan', 99)}
-                style={{
-                  width: '100%',
-                  padding: '10px',
-                  borderRadius: '8px',
-                  border: 'none',
-                  backgroundColor: subscription?.plan_type === 'enterprise' ? '#cbd5e1' : '#2563eb',
-                  color: '#ffffff',
-                  fontWeight: '600',
-                  cursor: subscription?.plan_type === 'enterprise' ? 'default' : 'pointer'
-                }}
-              >
-                {subscription?.plan_type === 'enterprise' ? 'Current Plan' : 'Select Enterprise'}
+                {subscription?.status === 'pending' ? 'Pending Admin Approval' : subscription?.status === 'active' ? 'Active Subscription' : 'Request Grant'}
               </button>
             </div>
           </div>
